@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/geoff/memory-managment-projects/deadlock-interceptor/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

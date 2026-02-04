@@ -1,0 +1,1 @@
+/usr/bin/c++ -fPIC -shared -Wl,--dependency-file=CMakeFiles/inspector.dir/link.d -Wl,-soname,libinspector.so -o libinspector.so CMakeFiles/inspector.dir/app.cpp.o  -ldl -lpthread
