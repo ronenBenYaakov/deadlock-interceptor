@@ -590,18 +590,17 @@ bool eliminate_other_threads_in_shadow(pid_t victim_tid) {
     
     // Kill all threads except ourselves and victim
     for (pid_t tid : all_tids) {
-        if (tid == getpid()) {
-            printf("    Skipping ourselves (PID=%d)\n", tid);
-            continue;
-        }
+        if (tid == getpid() || tid == victim_tid) continue;
+        
         if (tid == victim_tid) {
             printf("    Skipping victim (TID=%d)\n", tid);
             continue;
         }
-        
-        printf("    Killing thread %d\n", tid);
-        if (tgkill(getpid(), tid, SIGKILL) == -1) {
-            printf("    Failed to kill %d: %s\n", tid, strerror(errno));
+    
+        if (tgkill(getpid(), tid, SIGSTOP) == -1) {
+            perror("Failed to suspend thread");
+        } else {
+            printf("  Suspended thread %d\n", tid);
         }
     }
     
