@@ -151,7 +151,7 @@ CMAKE_PROJECT_DESCRIPTION:STATIC=
 CMAKE_PROJECT_HOMEPAGE_URL:STATIC=
 
 //Value Computed by CMake
-CMAKE_PROJECT_NAME:STATIC=DeadlockInspector
+CMAKE_PROJECT_NAME:STATIC=DeadlockResolver
 
 //Value Computed by CMake
 CMAKE_PROJECT_SPDX_LICENSE:STATIC=
@@ -229,6 +229,15 @@ DeadlockInspector_IS_TOP_LEVEL:STATIC=ON
 
 //Value Computed by CMake
 DeadlockInspector_SOURCE_DIR:STATIC=/home/geoff/memory-managment-projects/deadlock-interceptor
+
+//Value Computed by CMake
+DeadlockResolver_BINARY_DIR:STATIC=/home/geoff/memory-managment-projects/deadlock-interceptor/build
+
+//Value Computed by CMake
+DeadlockResolver_IS_TOP_LEVEL:STATIC=ON
+
+//Value Computed by CMake
+DeadlockResolver_SOURCE_DIR:STATIC=/home/geoff/memory-managment-projects/deadlock-interceptor
 
 //Dependencies for the target
 inspector_LIB_DEPENDS:STATIC=general;dl;general;pthread;

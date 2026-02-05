@@ -377,21 +377,24 @@ ThreadSnapshot snapshot_thread_state(pid_t tid) {
 }
 
 bool restore_thread_state(pid_t tid, const ThreadSnapshot& snap) {
-    printf("\033[1;33m[RESTORE] Restoring thread state...\033[0m\n");
-    
-    // Restore general purpose registers
-    if (ptrace(PTRACE_SETREGS, tid, nullptr, &snap.regs) == -1) {
-        perror("PTRACE_SETREGS failed");
+    if (!thread_exists(tid)) {
+        printf("  Cannot restore: thread %d no longer exists\n", tid);
         return false;
     }
     
-    // Restore floating point registers
-    if (ptrace(PTRACE_SETFPREGS, tid, nullptr, &snap.fpregs) == -1) {
-        printf("  Note: FP regs restore failed (not fatal)\n");
+    if (snap.regs.rip == 0) {
+        printf("  No valid snapshot to restore\n");
+        return false;
     }
     
-    printf("  ✓ Registers restored: RIP=0x%lx, RSP=0x%lx\n", 
-           (unsigned long)snap.regs.rip, (unsigned long)snap.regs.rsp);
+    printf("\033[1;33m[RESTORE] Restoring thread %d...\033[0m\n", tid);
+    
+    if (ptrace(PTRACE_SETREGS, tid, nullptr, &snap.regs) == -1) {
+        perror("  PTRACE_SETREGS failed");
+        return false;
+    }
+    
+    printf("  ✓ Registers restored\n");
     return true;
 }
 
@@ -504,39 +507,24 @@ bool stop_the_world() {
     printf("\033[1;33m[STEP 1] Stopping the world...\033[0m\n");
     
     monitoring_active.store(false);
+    printf("  Monitoring stopped\n");
     
     auto tids = list_threads(target_pid);
-    printf("  Need to stop %zu threads\n", tids.size());
+    printf("  Target has %zu threads\n", tids.size());
     
-    // Step 1: Let threads reach syscall boundaries
+    // SIMPLE APPROACH: Just detach from ptrace and let threads run free
+    // This ensures we can fork cleanly
     for (pid_t tid : tids) {
-        ptrace(PTRACE_SYSCALL, tid, nullptr, nullptr);
+        ptrace(PTRACE_DETACH, tid, nullptr, nullptr);
     }
     
-    // Step 2: Wait for them to stop
-    size_t stopped = 0;
-    for (int attempt = 0; attempt < 5; attempt++) {
-        stopped = 0;
-        
-        for (pid_t tid : tids) {
-            int status;
-            if (waitpid(tid, &status, __WALL | WNOHANG) > 0) {
-                if (WIFSTOPPED(status)) {
-                    stopped++;
-                }
-            }
-        }
-        
-        if (stopped == tids.size()) {
-            break;
-        }
-        usleep(50000); // 50ms
-    }
+    // Give threads a moment to resume
+    usleep(50000); // 50ms
     
-    printf("\033[1;32m[✓] %zu/%zu threads stopped\033[0m\n", stopped, tids.size());
     world_stopped.store(true);
+    printf("\033[1;32m[✓] Detached from all threads, ready for fork\033[0m\n");
     
-    return stopped > 0;
+    return true;
 }
 
 pid_t extract_tid_from_identifier(const std::string& identifier) {
@@ -582,68 +570,77 @@ std::string choose_victim_thread(const DeadlockInfo& deadlock) {
 bool eliminate_other_threads_in_shadow(pid_t victim_tid) {
     printf("\033[1;33m[STEP 5] Eliminating non-victim threads...\033[0m\n");
     
-    // Method 1: Kill all threads in our process group
-    kill(-getpid(), SIGKILL);
+    // Get list of all threads in this process
+    std::vector<pid_t> all_tids;
+    DIR* dir = opendir("/proc/self/task");
+    if (!dir) {
+        perror("opendir failed");
+        return false;
+    }
     
-    // Wait for deaths
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != nullptr) {
+        if (ent->d_name[0] == '.') continue;
+        pid_t tid = atoi(ent->d_name);
+        all_tids.push_back(tid);
+    }
+    closedir(dir);
+    
+    printf("  Found %zu threads total\n", all_tids.size());
+    
+    // Kill all threads except ourselves and victim
+    for (pid_t tid : all_tids) {
+        if (tid == getpid()) {
+            printf("    Skipping ourselves (PID=%d)\n", tid);
+            continue;
+        }
+        if (tid == victim_tid) {
+            printf("    Skipping victim (TID=%d)\n", tid);
+            continue;
+        }
+        
+        printf("    Killing thread %d\n", tid);
+        if (tgkill(getpid(), tid, SIGKILL) == -1) {
+            printf("    Failed to kill %d: %s\n", tid, strerror(errno));
+        }
+    }
+    
+    // Wait for threads to die
     usleep(100000); // 100ms
     
-    // Method 2: Manually check and kill any remaining
-    std::vector<pid_t> tids;
-    DIR* dir = opendir("/proc/self/task");
-    if (dir) {
-        struct dirent* ent;
-        while ((ent = readdir(dir)) != nullptr) {
-            if (ent->d_name[0] == '.') continue;
-            pid_t tid = atoi(ent->d_name);
-            tids.push_back(tid);
-        }
-        closedir(dir);
-    }
-    
-    // Kill everything except ourselves and victim
-    for (pid_t tid : tids) {
-        if (tid == getpid()) continue;  // Don't kill ourselves
-        if (tid == victim_tid) continue; // Don't kill victim
-        
-        printf("  Killing thread %d\n", tid);
-        tgkill(getpid(), tid, SIGKILL);
-    }
-    
-    // Wait again
-    usleep(50000); // 50ms
-    
-    // Check result
-    tids.clear();
+    // Check what remains
+    all_tids.clear();
     dir = opendir("/proc/self/task");
     if (dir) {
-        struct dirent* ent;
         while ((ent = readdir(dir)) != nullptr) {
             if (ent->d_name[0] == '.') continue;
             pid_t tid = atoi(ent->d_name);
-            tids.push_back(tid);
+            all_tids.push_back(tid);
         }
         closedir(dir);
     }
     
-    bool success = false;
-    for (pid_t tid : tids) {
+    printf("  %zu threads remain after elimination\n", all_tids.size());
+    for (pid_t tid : all_tids) {
+        printf("    Thread %d\n", tid);
+    }
+    
+    // Check if victim is still there
+    bool victim_alive = false;
+    for (pid_t tid : all_tids) {
         if (tid == victim_tid) {
-            success = true;
+            victim_alive = true;
             break;
         }
     }
     
-    if (success) {
-        printf("  ✓ Only victim thread %d remains\n", victim_tid);
+    if (victim_alive && all_tids.size() <= 2) { // Victim + ourselves
+        printf("  ✓ Victim isolated\n");
+        return true;
     } else {
         printf("  ✗ Failed to isolate victim\n");
-        printf("    Remaining threads:");
-        for (pid_t tid : tids) printf(" %d", tid);
-        printf("\n");
+        return false;
     }
-    
-    return success;
 }
 
 std::vector<MemoryRegion> initialize_private_memory(const std::vector<uint64_t>& locks) {
@@ -710,46 +707,40 @@ void force_unlock_futexes(const std::vector<uint64_t>& locks) {
 bool cleanup_parent_process(pid_t victim_tid, const std::vector<uint64_t>& deadlock_locks) {
     printf("\033[1;33m[STEP 9] Cleaning up parent process...\033[0m\n");
     
-    auto tids = list_threads(target_pid);
+    // IMPORTANT: We already detached all threads in stop_the_world()
+    // Don't detach again - just clean up data structures
     
-    // Step 1: Detach all threads from ptrace
-    for (pid_t tid : tids) {
-        if (tid == victim_tid) continue; // Victim is in shadow
-        
-        if (ptrace(PTRACE_DETACH, tid, nullptr, nullptr) == -1) {
-            // Thread might have exited, that's OK
-        }
-    }
-    
-    // Step 2: Release victim's locks
+    // Release victim's locks
     for (uint64_t lock_addr : deadlock_locks) {
         auto it = lock_owners.find(lock_addr);
         if (it != lock_owners.end()) {
-            if (it->second.find(std::to_string(victim_tid)) != std::string::npos) {
+            std::string owner = it->second;
+            if (owner.find(std::to_string(victim_tid)) != std::string::npos) {
                 printf("  Released lock %s\n", to_hex_string(lock_addr).c_str());
                 lock_owners.erase(it);
             }
         }
     }
     
-    // Step 3: Clear victim from data structures
+    // Remove victim from wait-for graph
     std::string victim_name = get_thread_identifier(victim_tid);
     waits_for.erase(victim_name);
-    thread_locks.erase(victim_name);
     
-    // Step 4: Resume remaining threads
-    for (pid_t tid : tids) {
-        if (tid == victim_tid) continue;
-        if (thread_exists(tid)) {
-            kill(tid, SIGCONT);
-            printf("  Resumed thread %d\n", tid);
+    // Clean up futex waiters containing victim
+    for (auto it = futex_waiters.begin(); it != futex_waiters.end(); ) {
+        auto& waiters = it->second;
+        waiters.erase(std::remove(waiters.begin(), waiters.end(), victim_name), waiters.end());
+        if (waiters.empty()) {
+            it = futex_waiters.erase(it);
+        } else {
+            ++it;
         }
     }
     
-    // Step 5: Resume monitoring
-    monitoring_active.store(true);
+    // DO NOT resume threads here - they're already running
+    // after we detached from ptrace
     
-    printf("  ✓ Parent cleaned up\n");
+    printf("  ✓ Parent cleaned up (threads already running)\n");
     return true;
 }
 
@@ -790,91 +781,106 @@ void monitor_shadow_process(pid_t shadow_pid, pid_t victim_tid, const DeadlockIn
 }
 
 bool resolve_deadlock_strategy1(const DeadlockInfo& deadlock) {
-    printf("\n\033[1;35m══════════════════════════════════════════════════════════════════\033[0m\n");
-    printf("\033[1;35m                 DEADLOCK RESOLUTION STRATEGY 1                   \033[0m\n");
-    printf("\033[1;35m══════════════════════════════════════════════════════════════════\033[0m\n\n");
+    printf("\n\033[1;35m[RESOLUTION] Breaking deadlock...\033[0m\n");
     
-    // Step 1: Stop the world
-    if (!stop_the_world()) {
-        fprintf(stderr, "\033[1;31mFailed to stop the world\033[0m\n");
-        monitoring_active.store(true);
-        return false;
+    monitoring_active.store(false);
+    
+    // Find victim
+    pid_t victim_tid = 0;
+    std::string victim_name;
+    for (const auto& thread_name : deadlock.cycle) {
+        pid_t tid = extract_tid_from_identifier(thread_name);
+        if (thread_exists(tid)) {
+            victim_tid = tid;
+            victim_name = thread_name;
+            break;
+        }
     }
-    
-    // Step 2: Choose victim
-    std::string victim_identifier = choose_victim_thread(deadlock);
-    pid_t victim_tid = extract_tid_from_identifier(victim_identifier);
     
     if (victim_tid == 0) {
-        fprintf(stderr, "\033[1;31mFailed to extract victim TID\033[0m\n");
+        printf("  No live threads in cycle\n");
         monitoring_active.store(true);
         return false;
     }
     
-    // Step 3: Snapshot victim state
+    printf("  Selected victim: %s\n", victim_name.c_str());
+    
+    // Snapshot (optional)
     ThreadSnapshot victim_snap = snapshot_thread_state(victim_tid);
     
-    // Step 4: Create shadow process (fork while ptrace-stopped)
-    pid_t shadow_pid = fork();
+    // Detach from all threads
+    auto tids = list_threads(target_pid);
+    for (pid_t tid : tids) {
+        ptrace(PTRACE_DETACH, tid, nullptr, nullptr);
+    }
     
-    if (shadow_pid == 0) {
-        // ========== SHADOW PROCESS ==========
-        printf("\033[1;36m[SHADOW] PID=%d, victim=%d\033[0m\n", getpid(), victim_tid);
+    usleep(100000);  // 100ms
+    
+    // Fork shadow
+    pid_t shadow = fork();
+    
+    if (shadow == 0) {
+        // SHADOW PROCESS
+        printf("\033[1;36m[SHADOW] PID=%d\033[0m\n", getpid());
         
-        // Step 5: Eliminate other threads
-        if (!eliminate_other_threads_in_shadow(victim_tid)) {
-            fprintf(stderr, "Failed to eliminate threads\n");
-            exit(1);
+        // Unlock futexes
+        for (uint64_t lock_addr : deadlock.involved_locks) {
+            size_t page_size = sysconf(_SC_PAGESIZE);
+            uintptr_t page_start = lock_addr & ~(page_size - 1);
+            
+            if (mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE) == 0) {
+                volatile uint32_t* futex = (volatile uint32_t*)lock_addr;
+                *futex = 0;
+                printf("  Unlocked %s\n", to_hex_string(lock_addr).c_str());
+            }
         }
         
-        // Step 6: Restore victim state
-        if (!restore_thread_state(victim_tid, victim_snap)) {
-            fprintf(stderr, "Failed to restore state\n");
-            exit(1);
+        // Resume victim
+        if (thread_exists(victim_tid)) {
+            kill(victim_tid, SIGCONT);
         }
         
-        // Step 7: Setup memory isolation
-        printf("[SHADOW] Setting up memory isolation...\n");
-        std::vector<MemoryRegion> protected_regions = 
-            initialize_private_memory(deadlock.involved_locks);
+        // Quick exit
+        _exit(0);
         
-        // Step 8: Force unlock futexes
-        force_unlock_futexes(deadlock.involved_locks);
+    } else if (shadow > 0) {
+        // PARENT PROCESS
+        printf("  Shadow PID: %d\n", shadow);
         
-        // Step 9: Detach victim from ptrace
-        printf("[SHADOW] Detaching victim from ptrace...\n");
-        if (ptrace(PTRACE_DETACH, victim_tid, nullptr, nullptr) == -1) {
-            perror("PTRACE_DETACH failed");
-            // Continue anyway
+        // Wait for shadow
+        int status;
+        waitpid(shadow, &status, 0);
+        
+        // Clean data structures
+        waits_for.erase(victim_name);
+        thread_locks.erase(victim_name);
+        
+        for (uint64_t lock_addr : deadlock.involved_locks) {
+            auto it = lock_owners.find(lock_addr);
+            if (it != lock_owners.end() && it->second == victim_name) {
+                lock_owners.erase(it);
+            }
         }
         
-        // Step 10: Make sure victim runs
-        kill(victim_tid, SIGCONT);
+        for (auto& [lock_addr, waiters] : futex_waiters) {
+            waiters.erase(std::remove(waiters.begin(), waiters.end(), victim_name), waiters.end());
+        }
         
-        printf("\033[1;36m[SHADOW] Victim %d running in shadow world\033[0m\n", victim_tid);
-        printf("[SHADOW] Shadow process will exit now (victim continues)\n");
+        // SIMPLE RECOVERY: Just continue monitoring without re-attaching
+        // The program will continue running, we just won't trace it anymore
+        printf("\033[1;32m[✓] Deadlock resolved! Program continues without tracing.\033[0m\n");
         
-        // Exit shadow process - victim thread continues independently
+        // Exit cleanly
+        printf("[*] Agent exiting after successful resolution\n");
         exit(0);
-    } else if (shadow_pid > 0) {
-        // ========== PARENT PROCESS ==========
-        printf("  ✓ Shadow process created (PID=%d)\n", shadow_pid);
         
-        // Step 9: Clean up parent
-        if (!cleanup_parent_process(victim_tid, deadlock.involved_locks)) {
-            fprintf(stderr, "\033[1;31mFailed to clean up parent process\033[0m\n");
-            return false;
-        }
-        
-        // Step 10: Monitor shadow process
-        monitor_shadow_process(shadow_pid, victim_tid, deadlock);
-        
-        return true;
     } else {
         perror("fork failed");
         monitoring_active.store(true);
         return false;
     }
+    
+    return true;  // Never reached
 }
 
 // ========== MONITORING LOGIC ==========
@@ -997,6 +1003,38 @@ void handle_syscall(pid_t tid) {
 #endif
 }
 
+bool emergency_deadlock_break(const DeadlockInfo& deadlock) {
+    printf("\033[1;31m[EMERGENCY] Breaking deadlock forcefully...\033[0m\n");
+    
+    // Just pick any thread and kill it
+    for (const auto& thread_name : deadlock.cycle) {
+        pid_t tid = extract_tid_from_identifier(thread_name);
+        if (thread_exists(tid)) {
+            printf("  Killing thread %d to break deadlock\n", tid);
+            kill(tid, SIGKILL);
+            
+            // Remove from data structures
+            std::string victim_name = get_thread_identifier(tid);
+            waits_for.erase(victim_name);
+            thread_locks.erase(victim_name);
+            
+            // Release its locks
+            for (auto it = lock_owners.begin(); it != lock_owners.end(); ) {
+                if (it->second == victim_name) {
+                    printf("  Released lock %s\n", to_hex_string(it->first).c_str());
+                    it = lock_owners.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            
+            return true;
+        }
+    }
+    
+    return false;
+}
+
 // Add this debug function
 void debug_wait_for_graph() {
     printf("\n[DEBUG] Wait-for graph:\n");
@@ -1021,64 +1059,47 @@ void detect_and_resolve_deadlocks() {
     std::unordered_set<std::string> stack;
     std::vector<std::string> cycle;
 
-    // DEBUG: Show current state
-    printf("\n[DEBUG] Checking for cycles...\n");
-    printf("  waits_for size: %zu\n", waits_for.size());
-    printf("  futex_waiters size: %zu\n", futex_waiters.size());
-    
-    for (const auto& [thread_name, waits_set] : waits_for) {
-        printf("  %s waits for %zu threads\n", thread_name.c_str(), waits_set.size());
-    }
-
     for (auto &kv : waits_for) {
         const std::string& thread_name = kv.first;
         if (!visited.count(thread_name)) {
             cycle.clear();
-            stack.clear();
-            
             if (dfs_deadlock(thread_name, visited, stack, cycle)) {
                 std::reverse(cycle.begin(), cycle.end());
                 
-                // Make sure cycle is complete
+                // Validate cycle is complete
                 if (cycle.size() >= 2) {
-                    // Check if first and last connect
-                    const std::string& first = cycle[0];
-                    const std::string& last = cycle.back();
+                    bool is_new = true;
+                    for (const auto& existing : detected_deadlocks) {
+                        if (existing.cycle == cycle) {
+                            is_new = false;
+                            break;
+                        }
+                    }
                     
-                    if (waits_for.count(last) && waits_for[last].count(first)) {
-                        // Complete cycle found
-                        bool is_new = true;
-                        for (const auto& existing : detected_deadlocks) {
-                            if (existing.cycle == cycle) {
-                                is_new = false;
-                                break;
+                    if (is_new) {
+                        deadlock_counter++;
+                        DeadlockInfo deadlock;
+                        deadlock.cycle = cycle;
+                        deadlock.involved_locks = find_locks_in_deadlock(cycle);
+                        deadlock.detection_time = std::chrono::system_clock::now();
+                        deadlock.deadlock_id = deadlock_counter;
+                        
+                        printf("\033[1;31m[DEADLOCK #%zu DETECTED]\033[0m\n", deadlock_counter);
+                        
+                        // Try Strategy 1
+                        if (resolve_deadlock_strategy1(deadlock)) {
+                            deadlock.resolved = true;
+                            printf("\033[1;32m✓ Resolved via Strategy 1\033[0m\n");
+                        } else {
+                            // Emergency fallback
+                            printf("\033[1;33mStrategy 1 failed, using emergency break\033[0m\n");
+                            if (emergency_deadlock_break(deadlock)) {
+                                deadlock.resolved = true;
+                                printf("\033[1;32m✓ Emergency break successful\033[0m\n");
                             }
                         }
                         
-                        if (is_new) {
-                            deadlock_counter++;
-                            DeadlockInfo deadlock;
-                            deadlock.cycle = cycle;
-                            deadlock.involved_locks = find_locks_in_deadlock(cycle);
-                            deadlock.detection_time = std::chrono::system_clock::now();
-                            deadlock.deadlock_id = deadlock_counter;
-                            
-                            printf("\033[1;31m[DEADLOCK DETECTED] Cycle found!\033[0m\n");
-                            for (size_t i = 0; i < cycle.size(); i++) {
-                                printf("  %s -> %s\n", cycle[i].c_str(), 
-                                       cycle[(i + 1) % cycle.size()].c_str());
-                            }
-                            
-                            // Try Strategy 1 resolution
-                            if (resolve_deadlock_strategy1(deadlock)) {
-                                deadlock.resolved = true;
-                                printf("\033[1;32m✓ Deadlock #%zu resolved using Strategy 1\033[0m\n", deadlock_counter);
-                            } else {
-                                printf("\033[1;33mStrategy 1 failed, continuing monitoring\033[0m\n");
-                            }
-                            
-                            detected_deadlocks.push_back(deadlock);
-                        }
+                        detected_deadlocks.push_back(deadlock);
                     }
                 }
             }

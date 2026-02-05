@@ -1,4 +1,3 @@
-/home/geoff/memory-managment-projects/deadlock-interceptor/build/CMakeFiles/inspector.dir
-/home/geoff/memory-managment-projects/deadlock-interceptor/build/CMakeFiles/test_main.dir
+/home/geoff/memory-managment-projects/deadlock-interceptor/build/CMakeFiles/deadlock_resolver.dir
 /home/geoff/memory-managment-projects/deadlock-interceptor/build/CMakeFiles/edit_cache.dir
 /home/geoff/memory-managment-projects/deadlock-interceptor/build/CMakeFiles/rebuild_cache.dir
