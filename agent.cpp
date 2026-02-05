@@ -1,9 +1,9 @@
+// deadlock_resolver.cpp - Complete Strategy 1 Implementation
 #include <sys/ptrace.h>
 #include <sys/wait.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
-#include <sstream>
 #include <linux/futex.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -12,6 +12,13 @@
 #include <sys/user.h>
 #include <sys/prctl.h>
 #include <fcntl.h>
+#include <sys/uio.h>
+#include <sys/signal.h>
+#include <sys/eventfd.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <linux/prctl.h>
+#include <sys/reg.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -28,15 +35,32 @@
 #include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <atomic>
+#include <queue>
+#include <condition_variable>
+#include <thread>
+#include <functional>
+#include <sstream>
+#include <string>
 
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono;
 
-struct LockEvent {
-    Clock::time_point last;
-    size_t acquire_count = 0;
-    size_t wait_time_total_ns = 0;
-    Clock::time_point first_seen;
+// ========== STRUCT DEFINITIONS ==========
+struct MemoryRegion {
+    uint64_t start;
+    uint64_t end;
+    std::string perms;
+    std::string name;
+};
+
+struct ThreadSnapshot {
+    struct user_regs_struct regs;
+    struct _libc_fpstate fpregs;
+    uint64_t fs_base;
+    uint64_t gs_base;
+    std::vector<uint8_t> signal_mask;
+    std::chrono::system_clock::time_point snapshot_time;
 };
 
 struct LockStats {
@@ -75,19 +99,65 @@ struct ThreadInfo {
     pid_t pid;
 };
 
-struct MemoryRegion {
-    uint64_t start;
-    uint64_t end;
-    std::string perms;
-    std::string name;
+struct ShadowProcess {
+    pid_t shadow_pid;
+    pid_t victim_tid;
+    std::vector<ResourceCopy> resource_copies;
+    std::vector<MemoryRegion> protected_regions;
+    std::chrono::system_clock::time_point creation_time;
+    std::atomic<bool> running{true};
+    int control_fd = -1;
+    
+    ShadowProcess() = default;
+    ShadowProcess(ShadowProcess&& other) noexcept
+        : shadow_pid(other.shadow_pid),
+          victim_tid(other.victim_tid),
+          resource_copies(std::move(other.resource_copies)),
+          protected_regions(std::move(other.protected_regions)),
+          creation_time(other.creation_time),
+          running(other.running.load()),
+          control_fd(other.control_fd) {
+        other.control_fd = -1;
+    }
+    
+    ShadowProcess& operator=(ShadowProcess&& other) noexcept {
+        if (this != &other) {
+            shadow_pid = other.shadow_pid;
+            victim_tid = other.victim_tid;
+            resource_copies = std::move(other.resource_copies);
+            protected_regions = std::move(other.protected_regions);
+            creation_time = other.creation_time;
+            running.store(other.running.load());
+            control_fd = other.control_fd;
+            other.control_fd = -1;
+        }
+        return *this;
+    }
+    
+    ShadowProcess(const ShadowProcess&) = delete;
+    ShadowProcess& operator=(const ShadowProcess&) = delete;
 };
 
-// Global variables
+struct DeadlockResolution {
+    size_t deadlock_id;
+    pid_t victim_tid;
+    std::string victim_name;
+    std::vector<uint64_t> involved_locks;
+    std::vector<MemoryRegion> guarded_regions;
+    ShadowProcess* shadow = nullptr;
+    bool success = false;
+    std::chrono::system_clock::time_point resolution_time;
+};
+
+// ========== GLOBAL VARIABLES ==========
 static pid_t target_pid = 0;
 static std::unordered_map<pid_t, ThreadInfo> thread_info_cache;
 static std::mutex thread_info_mutex;
+static std::atomic<bool> world_stopped{false};
+static std::atomic<bool> monitoring_active{true};
+static std::mutex resolution_mutex;
+static std::vector<MemoryRegion> g_protected_regions;
 
-// Main data structures
 static std::unordered_map<uint64_t, std::vector<std::string>> futex_waiters;
 static std::unordered_map<std::string, std::unordered_map<uint64_t, Clock::time_point>> wait_start_times;
 static std::unordered_map<std::string, std::unordered_set<std::string>> waits_for;
@@ -96,16 +166,17 @@ static std::unordered_map<uint64_t, std::string> lock_owners;
 static std::unordered_map<uint64_t, LockStats> lock_stats;
 
 static std::vector<DeadlockInfo> detected_deadlocks;
-static std::vector<ResourceCopy> resource_copies;
-static std::unordered_map<uint64_t, std::vector<ResourceCopy>> lock_to_resource_copies;
+static std::vector<ShadowProcess> shadow_processes;
+static std::vector<DeadlockResolution> resolution_history;
 
 static std::ofstream json_output;
 static std::ofstream deadlock_json_output;
 static std::ofstream resolution_log;
+static std::ofstream shadow_log;
 static size_t deadlock_counter = 0;
 static std::mutex output_mutex;
 
-// Helper function to convert uint64_t to hex string
+// ========== HELPER FUNCTIONS ==========
 std::string to_hex_string(uint64_t value) {
     std::stringstream ss;
     ss << "0x" << std::hex << value;
@@ -170,6 +241,161 @@ bool junk_addr(uint64_t addr) {
     return false;
 }
 
+bool read_process_memory(pid_t pid, void* addr, void* buffer, size_t size) {
+    size_t words = size / sizeof(long);
+    size_t remainder = size % sizeof(long);
+    
+    long* dest = static_cast<long*>(buffer);
+    long* src_addr = static_cast<long*>(addr);
+    
+    for (size_t i = 0; i < words; i++) {
+        errno = 0;
+        long word = ptrace(PTRACE_PEEKDATA, pid, src_addr + i, nullptr);
+        if (errno != 0) {
+            return false;
+        }
+        dest[i] = word;
+    }
+    
+    if (remainder > 0) {
+        errno = 0;
+        long word = ptrace(PTRACE_PEEKDATA, pid, src_addr + words, nullptr);
+        if (errno != 0) {
+            return false;
+        }
+        memcpy(dest + words, &word, remainder);
+    }
+    
+    return true;
+}
+
+bool thread_exists(pid_t tid) {
+    char path[256];
+    snprintf(path, sizeof(path), "/proc/%d/task/%d", target_pid, tid);
+    return access(path, F_OK) == 0;
+}
+
+bool write_process_memory(pid_t pid, void* addr, const void* buffer, size_t size) {
+    size_t words = size / sizeof(long);
+    size_t remainder = size % sizeof(long);
+    
+    const long* src = static_cast<const long*>(buffer);
+    long* dest_addr = static_cast<long*>(addr);
+    
+    for (size_t i = 0; i < words; i++) {
+        if (ptrace(PTRACE_POKEDATA, pid, dest_addr + i, src[i]) == -1) {
+            return false;
+        }
+    }
+    
+    if (remainder > 0) {
+        errno = 0;
+        long existing = ptrace(PTRACE_PEEKDATA, pid, dest_addr + words, nullptr);
+        if (errno != 0) {
+            return false;
+        }
+        
+        memcpy(&existing, src + words, remainder);
+        if (ptrace(PTRACE_POKEDATA, pid, dest_addr + words, existing) == -1) {
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+std::vector<MemoryRegion> read_process_maps(pid_t pid) {
+    std::vector<MemoryRegion> regions;
+    char maps_path[256];
+    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+    
+    FILE* maps_file = fopen(maps_path, "r");
+    if (!maps_file) {
+        return regions;
+    }
+    
+    char line[512];
+    while (fgets(line, sizeof(line), maps_file)) {
+        MemoryRegion region;
+        char perms[8];
+        char name[256] = {0};
+        
+        if (sscanf(line, "%lx-%lx %7s %*x %*x:%*x %*d %255[^\n]", 
+                   &region.start, &region.end, perms, name) >= 3) {
+            region.perms = perms;
+            region.name = name;
+            regions.push_back(region);
+        }
+    }
+    
+    fclose(maps_file);
+    return regions;
+}
+
+std::vector<pid_t> list_threads(pid_t pid) {
+    std::vector<pid_t> tids;
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/task", pid);
+
+    DIR *dir = opendir(path);
+    if (!dir) return tids;
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != nullptr) {
+        if (ent->d_name[0] == '.') continue;
+        pid_t tid = atoi(ent->d_name);
+        tids.push_back(tid);
+    }
+
+    closedir(dir);
+    return tids;
+}
+
+// ========== SNAPSHOT/RESTORE FUNCTIONS ==========
+ThreadSnapshot snapshot_thread_state(pid_t tid) {
+    ThreadSnapshot snap;
+    snap.snapshot_time = std::chrono::system_clock::now();
+    
+    // Check if thread still exists
+    if (!thread_exists(tid)) {
+        printf("  [WARNING] Thread %d no longer exists!\n", tid);
+        return snap;
+    }
+    
+    // Get general purpose registers
+    if (ptrace(PTRACE_GETREGS, tid, nullptr, &snap.regs) == -1) {
+        if (errno == ESRCH) {
+            printf("  [ERROR] Thread %d exited during snapshot\n", tid);
+        } else {
+            perror("PTRACE_GETREGS failed");
+        }
+        return snap;
+    }
+    
+    printf("  Snapshot complete: RIP=0x%lx\n", (unsigned long)snap.regs.rip);
+    return snap;
+}
+
+bool restore_thread_state(pid_t tid, const ThreadSnapshot& snap) {
+    printf("\033[1;33m[RESTORE] Restoring thread state...\033[0m\n");
+    
+    // Restore general purpose registers
+    if (ptrace(PTRACE_SETREGS, tid, nullptr, &snap.regs) == -1) {
+        perror("PTRACE_SETREGS failed");
+        return false;
+    }
+    
+    // Restore floating point registers
+    if (ptrace(PTRACE_SETFPREGS, tid, nullptr, &snap.fpregs) == -1) {
+        printf("  Note: FP regs restore failed (not fatal)\n");
+    }
+    
+    printf("  ✓ Registers restored: RIP=0x%lx, RSP=0x%lx\n", 
+           (unsigned long)snap.regs.rip, (unsigned long)snap.regs.rsp);
+    return true;
+}
+
+// ========== DEADLOCK DETECTION ==========
 bool dfs_deadlock(const std::string& thread_name,
                   std::unordered_set<std::string>& visited,
                   std::unordered_set<std::string>& stack,
@@ -182,12 +408,14 @@ bool dfs_deadlock(const std::string& thread_name,
     if (it != waits_for.end()) {
         for (const std::string& neighbor : it->second) {
             if (stack.count(neighbor)) {
+                // Cycle found
                 cycle.push_back(neighbor);
+                cycle.push_back(thread_name);
                 return true;
             }
             if (!visited.count(neighbor)) {
                 if (dfs_deadlock(neighbor, visited, stack, cycle)) {
-                    cycle.push_back(neighbor);
+                    cycle.push_back(thread_name);
                     return true;
                 }
             }
@@ -226,443 +454,430 @@ std::vector<uint64_t> find_locks_in_deadlock(const std::vector<std::string>& cyc
     return involved_locks;
 }
 
-bool read_process_memory(pid_t pid, void* addr, void* buffer, size_t size) {
-    size_t words = size / sizeof(long);
-    size_t remainder = size % sizeof(long);
-    
-    long* dest = static_cast<long*>(buffer);
-    long* src_addr = static_cast<long*>(addr);
-    
-    for (size_t i = 0; i < words; i++) {
-        errno = 0;
-        long word = ptrace(PTRACE_PEEKDATA, pid, src_addr + i, nullptr);
-        if (errno != 0) {
-            return false;
-        }
-        dest[i] = word;
-    }
-    
-    if (remainder > 0) {
-        errno = 0;
-        long word = ptrace(PTRACE_PEEKDATA, pid, src_addr + words, nullptr);
-        if (errno != 0) {
-            return false;
-        }
-        memcpy(dest + words, &word, remainder);
-    }
-    
-    return true;
-}
-
-bool write_process_memory(pid_t pid, void* addr, const void* buffer, size_t size) {
-    size_t words = size / sizeof(long);
-    size_t remainder = size % sizeof(long);
-    
-    const long* src = static_cast<const long*>(buffer);
-    long* dest_addr = static_cast<long*>(addr);
-    
-    for (size_t i = 0; i < words; i++) {
-        if (ptrace(PTRACE_POKEDATA, pid, dest_addr + i, src[i]) == -1) {
-            return false;
+// ========== MEMORY DUPLICATION LOGIC ==========
+bool should_duplicate_page(uintptr_t addr) {
+    for (auto& region : g_protected_regions) {
+        if (addr >= region.start && addr < region.end) {
+            return true;
         }
     }
-    
-    if (remainder > 0) {
-        errno = 0;
-        long existing = ptrace(PTRACE_PEEKDATA, pid, dest_addr + words, nullptr);
-        if (errno != 0) {
-            return false;
-        }
-        
-        memcpy(&existing, src + words, remainder);
-        if (ptrace(PTRACE_POKEDATA, pid, dest_addr + words, existing) == -1) {
-            return false;
-        }
-    }
-    
-    return true;
-}
-
-// Read process memory maps from /proc/[pid]/maps
-std::vector<MemoryRegion> read_process_maps(pid_t pid) {
-    std::vector<MemoryRegion> regions;
-    char maps_path[256];
-    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
-    
-    FILE* maps_file = fopen(maps_path, "r");
-    if (!maps_file) {
-        return regions;
-    }
-    
-    char line[512];
-    while (fgets(line, sizeof(line), maps_file)) {
-        MemoryRegion region;
-        char perms[8];
-        char name[256] = {0};
-        
-        if (sscanf(line, "%lx-%lx %7s %*x %*x:%*x %*d %255[^\n]", 
-                   &region.start, &region.end, perms, name) >= 3) {
-            region.perms = perms;
-            region.name = name;
-            regions.push_back(region);
-        }
-    }
-    
-    fclose(maps_file);
-    return regions;
-}
-
-// Create a copy of resources protected by a lock
-ResourceCopy create_resource_copy(uint64_t lock_addr) {
-    ResourceCopy copy;
-    copy.lock_addr = lock_addr;
-    copy.copy_time = std::chrono::system_clock::now();
-    
-    // Try to read the lock structure itself
-    copy.size = 64; // Reasonable guess for mutex size
-    copy.data.resize(copy.size);
-    copy.original_addr = reinterpret_cast<void*>(lock_addr);
-    
-    if (read_process_memory(target_pid, copy.original_addr, copy.data.data(), copy.size)) {
-        copy.copy_addr = malloc(copy.size);
-        if (copy.copy_addr) {
-            memcpy(copy.copy_addr, copy.data.data(), copy.size);
-            
-            printf("\033[1;32m[RESOURCE COPY] Created copy of lock structure at %s (%zu bytes)\033[0m\n",
-                   to_hex_string(lock_addr).c_str(), copy.size);
-            
-            if (resolution_log.is_open()) {
-                auto time_t = std::chrono::system_clock::to_time_t(copy.copy_time);
-                resolution_log << "Resource copy created: "
-                               << "lock=" << to_hex_string(lock_addr) << ", "
-                               << "addr=" << copy.original_addr << ", "
-                               << "size=" << copy.size << ", "
-                               << "time=" << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S") << "\n";
-            }
-            
-            return copy;
-        }
-    }
-    
-    copy.size = 0;
-    copy.original_addr = nullptr;
-    copy.copy_addr = nullptr;
-    return copy;
-}
-
-// Split threads into two groups for resolution
-void split_thread_groups(const std::vector<std::string>& threads,
-                         std::vector<std::string>& groupA,
-                         std::vector<std::string>& groupB) {
-    groupA.clear();
-    groupB.clear();
-    
-    for (size_t i = 0; i < threads.size(); i++) {
-        if (i % 2 == 0) {
-            groupA.push_back(threads[i]);
-        } else {
-            groupB.push_back(threads[i]);
-        }
-    }
-}
-
-// Attempt to break a deadlock by creating resource copies
-bool attempt_deadlock_resolution(const DeadlockInfo& deadlock) {
-    printf("\033[1;35m[ATTEMPTING DEADLOCK RESOLUTION] Trying to break deadlock #%zu\033[0m\n", deadlock.deadlock_id);
-    
-    if (deadlock.involved_locks.empty()) {
-        printf("\033[1;31m  No locks involved in deadlock\033[0m\n");
-        return false;
-    }
-    
-    // Try to create a resource copy for each lock
-    std::vector<ResourceCopy> new_copies;
-    
-    for (uint64_t lock_addr : deadlock.involved_locks) {
-        if (lock_stats.count(lock_addr)) {
-            lock_stats[lock_addr].deadlock_resolution_attempts++;
-        }
-        
-        ResourceCopy copy = create_resource_copy(lock_addr);
-        if (copy.size > 0 && copy.copy_addr != nullptr) {
-            new_copies.push_back(copy);
-            lock_to_resource_copies[lock_addr].push_back(copy);
-            
-            printf("\033[1;32m  ✓ Created resource copy for lock %s\033[0m\n", 
-                   to_hex_string(lock_addr).c_str());
-            
-            if (lock_stats.count(lock_addr)) {
-                lock_stats[lock_addr].successful_resolutions++;
-            }
-        } else {
-            printf("\033[1;33m  ✗ Failed to create resource copy for lock %s\033[0m\n", 
-                   to_hex_string(lock_addr).c_str());
-        }
-    }
-    
-    if (!new_copies.empty()) {
-        // Add copies to global list
-        resource_copies.insert(resource_copies.end(), new_copies.begin(), new_copies.end());
-        
-        // Split threads into groups for visualization
-        std::vector<std::string> groupA, groupB;
-        split_thread_groups(deadlock.cycle, groupA, groupB);
-        
-        printf("\033[1;32m[RESOLUTION] Created %zu resource copies\033[0m\n", new_copies.size());
-        printf("  Group A threads (%zu): ", groupA.size());
-        for (const auto& t : groupA) printf("%s ", t.c_str());
-        printf("\n");
-        printf("  Group B threads (%zu): ", groupB.size());
-        for (const auto& t : groupB) printf("%s ", t.c_str());
-        printf("\n");
-        
-        return true;
-    }
-    
-    printf("\033[1;31m[RESOLUTION FAILED] Could not create any resource copies\033[0m\n");
     return false;
 }
 
-void save_deadlock_to_json(const DeadlockInfo& deadlock) {
-    if (!deadlock_json_output.is_open()) {
-        deadlock_json_output.open("deadlocks.json", std::ios::out | std::ios::app);
-        if (!deadlock_json_output.is_open()) {
-            fprintf(stderr, "Warning: Could not open deadlocks.json for writing\n");
-            return;
-        }
-        deadlock_json_output << "[\n";
+static void shadow_sigsegv_handler(int sig, siginfo_t* info, void* context) {
+    void* fault_addr = info->si_addr;
+    size_t page_size = sysconf(_SC_PAGESIZE);
+    uintptr_t page_start = ((uintptr_t)fault_addr / page_size) * page_size;
+    
+    printf("[SHADOW SIGSEGV] Fault at %p, handling page 0x%lx\n", 
+           fault_addr, page_start);
+    
+    // Check if this is a protected region
+    if (!should_duplicate_page(page_start)) {
+        fprintf(stderr, "[SHADOW] Unhandled fault at %p - aborting\n", fault_addr);
+        exit(1);
     }
     
-    auto time_t = std::chrono::system_clock::to_time_t(deadlock.detection_time);
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        deadlock.detection_time.time_since_epoch()) % 1000;
+    // Save original page content
+    uint8_t page_copy[page_size];
+    memcpy(page_copy, (void*)page_start, page_size);
     
-    if (deadlock_counter > 0) {
-        deadlock_json_output << ",\n";
+    // Create NEW private page with MAP_FIXED
+    void* new_page = mmap((void*)page_start, page_size,
+                         PROT_READ | PROT_WRITE,
+                         MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS,
+                         -1, 0);
+    
+    if (new_page == MAP_FAILED) {
+        perror("[SHADOW] mmap MAP_FIXED failed");
+        exit(1);
     }
     
-    deadlock_json_output << "  {\n";
-    deadlock_json_output << "    \"deadlock_id\": " << deadlock.deadlock_id << ",\n";
-    deadlock_json_output << "    \"detection_time\": \"" << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S")
-                         << "." << std::setfill('0') << std::setw(3) << ms.count() << "\",\n";
-    deadlock_json_output << "    \"resolved\": " << (deadlock.resolved ? "true" : "false") << ",\n";
+    // Restore original content to new private page
+    memcpy(new_page, page_copy, page_size);
     
-    deadlock_json_output << "    \"cycle\": [";
-    for (size_t i = 0; i < deadlock.cycle.size(); i++) {
-        if (i > 0) deadlock_json_output << ", ";
-        deadlock_json_output << "\"" << deadlock.cycle[i] << "\"";
-    }
-    deadlock_json_output << "],\n";
-    
-    deadlock_json_output << "    \"involved_locks\": [";
-    for (size_t i = 0; i < deadlock.involved_locks.size(); i++) {
-        if (i > 0) deadlock_json_output << ", ";
-        deadlock_json_output << "\"" << to_hex_string(deadlock.involved_locks[i]) << "\"";
-    }
-    deadlock_json_output << "],\n";
-    
-    deadlock_json_output << "    \"lock_details\": [\n";
-    for (size_t i = 0; i < deadlock.involved_locks.size(); i++) {
-        uint64_t lock_addr = deadlock.involved_locks[i];
-        if (i > 0) deadlock_json_output << ",\n";
-        deadlock_json_output << "      {\n";
-        deadlock_json_output << "        \"address\": \"" << to_hex_string(lock_addr) << "\",\n";
-        deadlock_json_output << "        \"owner\": \"" << (lock_owners.count(lock_addr) ? lock_owners[lock_addr] : "none") << "\",\n";
-        deadlock_json_output << "        \"waiters\": [";
-        
-        bool first = true;
-        auto waiters_it = futex_waiters.find(lock_addr);
-        if (waiters_it != futex_waiters.end()) {
-            for (const std::string& waiter : waiters_it->second) {
-                if (!first) deadlock_json_output << ", ";
-                first = false;
-                deadlock_json_output << "\"" << waiter << "\"";
-            }
-        }
-        deadlock_json_output << "]\n";
-        deadlock_json_output << "      }";
-    }
-    deadlock_json_output << "\n    ]\n";
-    deadlock_json_output << "  }";
-    
-    deadlock_json_output.flush();
+    printf("[SHADOW] Page 0x%lx replaced with private copy\n", page_start);
 }
 
-void dump_graph(const std::string &filename = "locks.dot") {
-    std::lock_guard<std::mutex> lock(output_mutex);
-    std::ofstream out(filename);
-    if (!out.is_open()) return;
-
-    out << "digraph LockGraph {\n";
-    out << "  rankdir=LR;\n";
-    out << "  node [shape=box, style=filled];\n\n";
-
-    std::unordered_set<std::string> all_threads;
-    for (auto &kv : waits_for) all_threads.insert(kv.first);
-    for (auto &kv : lock_owners) all_threads.insert(kv.second);
-
-    // Thread nodes
-    for (const std::string& thread_name : all_threads) {
-        out << "  \"" << thread_name << "\" [label=\"" << thread_name << "\"";
-        for (const auto& deadlock : detected_deadlocks) {
-            if (std::find(deadlock.cycle.begin(), deadlock.cycle.end(), thread_name) != deadlock.cycle.end()) {
-                if (deadlock.resolved) {
-                    out << ", color=orange, fillcolor=lightyellow";
-                } else {
-                    out << ", color=red, fillcolor=lightcoral";
+// ========== STRATEGY 1 IMPLEMENTATION ==========
+bool stop_the_world() {
+    printf("\033[1;33m[STEP 1] Stopping the world...\033[0m\n");
+    
+    monitoring_active.store(false);
+    
+    auto tids = list_threads(target_pid);
+    printf("  Need to stop %zu threads\n", tids.size());
+    
+    // Step 1: Let threads reach syscall boundaries
+    for (pid_t tid : tids) {
+        ptrace(PTRACE_SYSCALL, tid, nullptr, nullptr);
+    }
+    
+    // Step 2: Wait for them to stop
+    size_t stopped = 0;
+    for (int attempt = 0; attempt < 5; attempt++) {
+        stopped = 0;
+        
+        for (pid_t tid : tids) {
+            int status;
+            if (waitpid(tid, &status, __WALL | WNOHANG) > 0) {
+                if (WIFSTOPPED(status)) {
+                    stopped++;
                 }
-                break;
             }
         }
-        out << "];\n";
-    }
-
-    // Lock nodes
-    for (auto &kv : lock_owners) {
-        std::string lock_label = "L" + to_hex_string(kv.first);
-        out << "  \"" << lock_label << "\" [label=\"" << to_hex_string(kv.first);
         
-        if (lock_to_resource_copies.count(kv.first) && !lock_to_resource_copies[kv.first].empty()) {
-            out << "\\n" << lock_to_resource_copies[kv.first].size() << " copies";
+        if (stopped == tids.size()) {
+            break;
         }
-        
-        out << "\", shape=ellipse";
-        for (const auto& deadlock : detected_deadlocks) {
-            if (std::find(deadlock.involved_locks.begin(), deadlock.involved_locks.end(), kv.first) != deadlock.involved_locks.end()) {
-                if (deadlock.resolved) {
-                    out << ", color=green, fillcolor=lightgreen";
-                } else {
-                    out << ", color=orange, fillcolor=lightyellow";
-                }
-                break;
-            }
-        }
-        out << "];\n";
+        usleep(50000); // 50ms
     }
+    
+    printf("\033[1;32m[✓] %zu/%zu threads stopped\033[0m\n", stopped, tids.size());
+    world_stopped.store(true);
+    
+    return stopped > 0;
+}
 
-    // Resource copy nodes
-    for (const auto& copy : resource_copies) {
-        if (copy.copy_addr != nullptr) {
-            std::string copy_label = "C" + to_hex_string(reinterpret_cast<uint64_t>(copy.copy_addr));
-            out << "  \"" << copy_label << "\" [label=\"Copy\\n" << copy.size << "B\", shape=cds, color=blue, fillcolor=lightblue];\n";
+pid_t extract_tid_from_identifier(const std::string& identifier) {
+    size_t bracket_pos = identifier.find('[');
+    size_t end_bracket = identifier.find(']');
+    if (bracket_pos != std::string::npos && end_bracket != std::string::npos) {
+        std::string tid_str = identifier.substr(bracket_pos + 1, end_bracket - bracket_pos - 1);
+        return std::stoi(tid_str);
+    }
+    return 0;
+}
+    
+std::string choose_victim_thread(const DeadlockInfo& deadlock) {
+    printf("\033[1;33m[STEP 2] Choosing victim thread...\033[0m\n");
+    
+    // Remove duplicates from cycle
+    std::unordered_set<std::string> unique_threads;
+    for (const auto& thread : deadlock.cycle) {
+        unique_threads.insert(thread);
+    }
+    
+    // Find first live thread
+    std::string best_victim;
+    for (const std::string& thread_name : unique_threads) {
+        pid_t tid = extract_tid_from_identifier(thread_name);
+        if (thread_exists(tid)) {
+            best_victim = thread_name;
+            break;
+        }
+    }
+    
+    if (best_victim.empty() && !deadlock.cycle.empty()) {
+        best_victim = deadlock.cycle[0];
+    }
+    
+    pid_t victim_tid = extract_tid_from_identifier(best_victim);
+    printf("  Selected victim: %s (TID=%d)\n", best_victim.c_str(), victim_tid);
+    
+    return best_victim;
+}
+
+
+bool eliminate_other_threads_in_shadow(pid_t victim_tid) {
+    printf("\033[1;33m[STEP 5] Eliminating non-victim threads...\033[0m\n");
+    
+    // Method 1: Kill all threads in our process group
+    kill(-getpid(), SIGKILL);
+    
+    // Wait for deaths
+    usleep(100000); // 100ms
+    
+    // Method 2: Manually check and kill any remaining
+    std::vector<pid_t> tids;
+    DIR* dir = opendir("/proc/self/task");
+    if (dir) {
+        struct dirent* ent;
+        while ((ent = readdir(dir)) != nullptr) {
+            if (ent->d_name[0] == '.') continue;
+            pid_t tid = atoi(ent->d_name);
+            tids.push_back(tid);
+        }
+        closedir(dir);
+    }
+    
+    // Kill everything except ourselves and victim
+    for (pid_t tid : tids) {
+        if (tid == getpid()) continue;  // Don't kill ourselves
+        if (tid == victim_tid) continue; // Don't kill victim
+        
+        printf("  Killing thread %d\n", tid);
+        tgkill(getpid(), tid, SIGKILL);
+    }
+    
+    // Wait again
+    usleep(50000); // 50ms
+    
+    // Check result
+    tids.clear();
+    dir = opendir("/proc/self/task");
+    if (dir) {
+        struct dirent* ent;
+        while ((ent = readdir(dir)) != nullptr) {
+            if (ent->d_name[0] == '.') continue;
+            pid_t tid = atoi(ent->d_name);
+            tids.push_back(tid);
+        }
+        closedir(dir);
+    }
+    
+    bool success = false;
+    for (pid_t tid : tids) {
+        if (tid == victim_tid) {
+            success = true;
+            break;
+        }
+    }
+    
+    if (success) {
+        printf("  ✓ Only victim thread %d remains\n", victim_tid);
+    } else {
+        printf("  ✗ Failed to isolate victim\n");
+        printf("    Remaining threads:");
+        for (pid_t tid : tids) printf(" %d", tid);
+        printf("\n");
+    }
+    
+    return success;
+}
+
+std::vector<MemoryRegion> initialize_private_memory(const std::vector<uint64_t>& locks) {
+    printf("\033[1;33m[STEP 6] Initializing private-memory machinery...\033[0m\n");
+    
+    std::vector<MemoryRegion> protected_regions;
+    
+    // Install SIGSEGV handler
+    struct sigaction sa;
+    sa.sa_sigaction = shadow_sigsegv_handler;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART | SA_NODEFER;
+    sigemptyset(&sa.sa_mask);
+    
+    if (sigaction(SIGSEGV, &sa, NULL) == -1) {
+        perror("sigaction SIGSEGV failed");
+        return protected_regions;
+    }
+    
+    printf("  ✓ SIGSEGV handler installed\n");
+    
+    // Protect lock regions
+    for (uint64_t lock_addr : locks) {
+        MemoryRegion region;
+        region.start = lock_addr & ~(sysconf(_SC_PAGESIZE) - 1);
+        region.end = region.start + sysconf(_SC_PAGESIZE);
+        region.perms = "---";
+        region.name = "protected_lock_" + to_hex_string(lock_addr);
+        
+        if (mprotect((void*)region.start, region.end - region.start, PROT_NONE) == 0) {
+            protected_regions.push_back(region);
+            g_protected_regions.push_back(region);
+            printf("  ✓ Protected lock at %s (page 0x%lx)\n", 
+                   to_hex_string(lock_addr).c_str(), region.start);
+        } else {
+            perror("mprotect failed");
+        }
+    }
+    
+    return protected_regions;
+}
+
+void force_unlock_futexes(const std::vector<uint64_t>& locks) {
+    printf("\033[1;33m[LOCK ILLUSION] Forcing unlock...\033[0m\n");
+    
+    for (uint64_t lock_addr : locks) {
+        size_t page_size = sysconf(_SC_PAGESIZE);
+        uintptr_t page_start = lock_addr & ~(page_size - 1);
+        
+        // Temporarily make page writable
+        if (mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE) == 0) {
+            // Write 0 to futex (unlocked)
+            volatile uint32_t* futex_ptr = (volatile uint32_t*)(lock_addr);
+            uint32_t old_value = *futex_ptr;
+            *futex_ptr = 0;
+            printf("  ✓ Unlocked %s (was 0x%x)\n", 
+                   to_hex_string(lock_addr).c_str(), old_value);
             
-            std::string lock_label = "L" + to_hex_string(copy.lock_addr);
-            out << "  \"" << lock_label << "\" -> \"" << copy_label << "\" [style=dashed, color=blue];\n";
-        }
-    }
-
-    out << "\n";
-
-    // Ownership edges
-    for (auto &kv : lock_owners) {
-        std::string lock_label = "L" + to_hex_string(kv.first);
-        out << "  \"" << kv.second << "\" -> \"" << lock_label << "\" [label=\"owns\", color=green];\n";
-    }
-
-    // Wait-for edges
-    for (auto &kv : waits_for) {
-        for (const std::string& w : kv.second) {
-            out << "  \"" << kv.first << "\" -> \"" << w << "\" [label=\"waits\", color=red";
-            for (const auto& deadlock : detected_deadlocks) {
-                auto it1 = std::find(deadlock.cycle.begin(), deadlock.cycle.end(), kv.first);
-                auto it2 = std::find(deadlock.cycle.begin(), deadlock.cycle.end(), w);
-                if (it1 != deadlock.cycle.end() && it2 != deadlock.cycle.end()) {
-                    out << ", penwidth=3.0";
-                    break;
-                }
-            }
-            out << "];\n";
-        }
-    }
-
-    out << "}\n";
-    printf("[GRAPH] Dumped lock graph to %s\n", filename.c_str());
-}
-
-void detect_deadlocks() {
-    std::lock_guard<std::mutex> lock(output_mutex);
-    std::unordered_set<std::string> visited;
-    std::unordered_set<std::string> stack;
-    std::vector<std::string> cycle;
-
-    for (auto &kv : waits_for) {
-        const std::string& thread_name = kv.first;
-        if (!visited.count(thread_name)) {
-            cycle.clear();
-            if (dfs_deadlock(thread_name, visited, stack, cycle)) {
-                std::reverse(cycle.begin(), cycle.end());
-                
-                bool is_new = true;
-                for (const auto& existing : detected_deadlocks) {
-                    if (existing.cycle == cycle) {
-                        is_new = false;
-                        break;
-                    }
-                }
-                
-                if (is_new) {
-                    deadlock_counter++;
-                    DeadlockInfo deadlock;
-                    deadlock.cycle = cycle;
-                    deadlock.involved_locks = find_locks_in_deadlock(cycle);
-                    deadlock.detection_time = std::chrono::system_clock::now();
-                    deadlock.deadlock_id = deadlock_counter;
-                    
-                    if (attempt_deadlock_resolution(deadlock)) {
-                        deadlock.resolved = true;
-                        printf("\033[1;32m✓ Deadlock #%zu marked as resolved\033[0m\n", deadlock_counter);
-                    }
-                    
-                    detected_deadlocks.push_back(deadlock);
-                    
-                    // Print deadlock info
-                    printf("\n\033[1;31m╔══════════════════════════════════════════════════════════════════╗\033[0m\n");
-                    printf("\033[1;31m║                    DEADLOCK DETECTED #%zu                     ║\033[0m\n", deadlock.deadlock_id);
-                    printf("\033[1;31m╠══════════════════════════════════════════════════════════════════╣\033[0m\n");
-                    printf("\033[1;33m║ Cycle:\033[0m ");
-                    for (size_t i = 0; i < cycle.size(); i++) {
-                        printf("\033[1;36m%s\033[0m", cycle[i].c_str());
-                        if (i < cycle.size() - 1) printf(" \033[1;33m→\033[0m ");
-                    }
-                    printf("\n");
-                    
-                    printf("\033[1;33m║ Involved locks:\033[0m ");
-                    for (uint64_t lock_addr : deadlock.involved_locks) {
-                        printf("\033[1;35m%s\033[0m ", to_hex_string(lock_addr).c_str());
-                    }
-                    printf("\n");
-                    
-                    printf("\033[1;33m║ Status:\033[0m %s\n", deadlock.resolved ? "\033[1;32mRESOLVED\033[0m" : "\033[1;31mUNRESOLVED\033[0m");
-                    
-                    if (!deadlock.involved_locks.empty()) {
-                        printf("\033[1;33m║ Lock details:\033[0m\n");
-                        for (uint64_t lock_addr : deadlock.involved_locks) {
-                            auto owner_it = lock_owners.find(lock_addr);
-                            auto waiters_it = futex_waiters.find(lock_addr);
-                            printf("\033[1;33m║   %s\033[0m owned by \033[1;36m%s\033[0m, waiters: ", 
-                                   to_hex_string(lock_addr).c_str(),
-                                   owner_it != lock_owners.end() ? owner_it->second.c_str() : "none");
-                            if (waiters_it != futex_waiters.end() && !waiters_it->second.empty()) {
-                                for (size_t i = 0; i < waiters_it->second.size(); i++) {
-                                    printf("\033[1;31m%s\033[0m", waiters_it->second[i].c_str());
-                                    if (i < waiters_it->second.size() - 1) printf(", ");
-                                }
-                            } else {
-                                printf("none");
-                            }
-                            printf("\n");
-                        }
-                    }
-                    printf("\033[1;31m╚══════════════════════════════════════════════════════════════════╝\033[0m\n\n");
-                    
-                    save_deadlock_to_json(deadlock);
-                    dump_graph();
-                }
-            }
+            // Restore protection
+            mprotect((void*)page_start, page_size, PROT_NONE);
         }
     }
 }
 
+bool cleanup_parent_process(pid_t victim_tid, const std::vector<uint64_t>& deadlock_locks) {
+    printf("\033[1;33m[STEP 9] Cleaning up parent process...\033[0m\n");
+    
+    auto tids = list_threads(target_pid);
+    
+    // Step 1: Detach all threads from ptrace
+    for (pid_t tid : tids) {
+        if (tid == victim_tid) continue; // Victim is in shadow
+        
+        if (ptrace(PTRACE_DETACH, tid, nullptr, nullptr) == -1) {
+            // Thread might have exited, that's OK
+        }
+    }
+    
+    // Step 2: Release victim's locks
+    for (uint64_t lock_addr : deadlock_locks) {
+        auto it = lock_owners.find(lock_addr);
+        if (it != lock_owners.end()) {
+            if (it->second.find(std::to_string(victim_tid)) != std::string::npos) {
+                printf("  Released lock %s\n", to_hex_string(lock_addr).c_str());
+                lock_owners.erase(it);
+            }
+        }
+    }
+    
+    // Step 3: Clear victim from data structures
+    std::string victim_name = get_thread_identifier(victim_tid);
+    waits_for.erase(victim_name);
+    thread_locks.erase(victim_name);
+    
+    // Step 4: Resume remaining threads
+    for (pid_t tid : tids) {
+        if (tid == victim_tid) continue;
+        if (thread_exists(tid)) {
+            kill(tid, SIGCONT);
+            printf("  Resumed thread %d\n", tid);
+        }
+    }
+    
+    // Step 5: Resume monitoring
+    monitoring_active.store(true);
+    
+    printf("  ✓ Parent cleaned up\n");
+    return true;
+}
+
+void monitor_shadow_process(pid_t shadow_pid, pid_t victim_tid, const DeadlockInfo& deadlock) {
+    printf("\033[1;33m[STEP 10] Monitoring shadow process %d...\033[0m\n", shadow_pid);
+    
+    pid_t monitor = fork();
+    
+    if (monitor == 0) {
+        // Monitor child
+        int status;
+        waitpid(shadow_pid, &status, 0);
+        
+        if (WIFEXITED(status)) {
+            printf("\033[1;36m[SHADOW MONITOR] Process %d exited with code %d\033[0m\n", 
+                   shadow_pid, WEXITSTATUS(status));
+        } else if (WIFSIGNALED(status)) {
+            printf("\033[1;31m[SHADOW MONITOR] Process %d killed by signal %d\033[0m\n", 
+                   shadow_pid, WTERMSIG(status));
+        }
+        
+        exit(0);
+    } else if (monitor > 0) {
+        // Parent continues
+        printf("  ✓ Monitor process %d started\n", monitor);
+        
+        // Update deadlock info
+        for (auto& dl : detected_deadlocks) {
+            if (dl.deadlock_id == deadlock.deadlock_id) {
+                dl.resolved = true;
+                break;
+            }
+        }
+        
+        printf("\033[1;32m[✓] Deadlock #%zu resolved via shadow process %d\033[0m\n", 
+               deadlock.deadlock_id, shadow_pid);
+    }
+}
+
+bool resolve_deadlock_strategy1(const DeadlockInfo& deadlock) {
+    printf("\n\033[1;35m══════════════════════════════════════════════════════════════════\033[0m\n");
+    printf("\033[1;35m                 DEADLOCK RESOLUTION STRATEGY 1                   \033[0m\n");
+    printf("\033[1;35m══════════════════════════════════════════════════════════════════\033[0m\n\n");
+    
+    // Step 1: Stop the world
+    if (!stop_the_world()) {
+        fprintf(stderr, "\033[1;31mFailed to stop the world\033[0m\n");
+        monitoring_active.store(true);
+        return false;
+    }
+    
+    // Step 2: Choose victim
+    std::string victim_identifier = choose_victim_thread(deadlock);
+    pid_t victim_tid = extract_tid_from_identifier(victim_identifier);
+    
+    if (victim_tid == 0) {
+        fprintf(stderr, "\033[1;31mFailed to extract victim TID\033[0m\n");
+        monitoring_active.store(true);
+        return false;
+    }
+    
+    // Step 3: Snapshot victim state
+    ThreadSnapshot victim_snap = snapshot_thread_state(victim_tid);
+    
+    // Step 4: Create shadow process (fork while ptrace-stopped)
+    pid_t shadow_pid = fork();
+    
+    if (shadow_pid == 0) {
+        // ========== SHADOW PROCESS ==========
+        printf("\033[1;36m[SHADOW] PID=%d, victim=%d\033[0m\n", getpid(), victim_tid);
+        
+        // Step 5: Eliminate other threads
+        if (!eliminate_other_threads_in_shadow(victim_tid)) {
+            fprintf(stderr, "Failed to eliminate threads\n");
+            exit(1);
+        }
+        
+        // Step 6: Restore victim state
+        if (!restore_thread_state(victim_tid, victim_snap)) {
+            fprintf(stderr, "Failed to restore state\n");
+            exit(1);
+        }
+        
+        // Step 7: Setup memory isolation
+        printf("[SHADOW] Setting up memory isolation...\n");
+        std::vector<MemoryRegion> protected_regions = 
+            initialize_private_memory(deadlock.involved_locks);
+        
+        // Step 8: Force unlock futexes
+        force_unlock_futexes(deadlock.involved_locks);
+        
+        // Step 9: Detach victim from ptrace
+        printf("[SHADOW] Detaching victim from ptrace...\n");
+        if (ptrace(PTRACE_DETACH, victim_tid, nullptr, nullptr) == -1) {
+            perror("PTRACE_DETACH failed");
+            // Continue anyway
+        }
+        
+        // Step 10: Make sure victim runs
+        kill(victim_tid, SIGCONT);
+        
+        printf("\033[1;36m[SHADOW] Victim %d running in shadow world\033[0m\n", victim_tid);
+        printf("[SHADOW] Shadow process will exit now (victim continues)\n");
+        
+        // Exit shadow process - victim thread continues independently
+        exit(0);
+    } else if (shadow_pid > 0) {
+        // ========== PARENT PROCESS ==========
+        printf("  ✓ Shadow process created (PID=%d)\n", shadow_pid);
+        
+        // Step 9: Clean up parent
+        if (!cleanup_parent_process(victim_tid, deadlock.involved_locks)) {
+            fprintf(stderr, "\033[1;31mFailed to clean up parent process\033[0m\n");
+            return false;
+        }
+        
+        // Step 10: Monitor shadow process
+        monitor_shadow_process(shadow_pid, victim_tid, deadlock);
+        
+        return true;
+    } else {
+        perror("fork failed");
+        monitoring_active.store(true);
+        return false;
+    }
+}
+
+// ========== MONITORING LOGIC ==========
 void update_lock_stats(uint64_t addr, const std::string& new_owner) {
     auto now = Clock::now();
     auto system_now = std::chrono::system_clock::now();
@@ -685,75 +900,7 @@ void update_lock_stats(uint64_t addr, const std::string& new_owner) {
         stats.waiters_count = futex_waiters[addr].size();
         stats.waiting_threads = futex_waiters[addr];
         stats.last_acquire_time = system_now;
-        
-        if (wait_start_times.count(new_owner) && wait_start_times[new_owner].count(addr)) {
-            auto wait_start = wait_start_times[new_owner][addr];
-            auto wait_duration = duration_cast<nanoseconds>(now - wait_start).count();
-            
-            double total_wait = stats.avg_wait_time_ns * (stats.total_acquisitions - 1);
-            stats.avg_wait_time_ns = (total_wait + wait_duration) / stats.total_acquisitions;
-            
-            wait_start_times[new_owner].erase(addr);
-        }
     }
-}
-
-void save_lock_stats_to_json() {
-    if (!json_output.is_open()) return;
-    
-    auto now = std::chrono::system_clock::now();
-    auto now_time_t = std::chrono::system_clock::to_time_t(now);
-    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now.time_since_epoch()) % 1000;
-    
-    json_output << "{\n";
-    json_output << "  \"timestamp\": \"" << std::put_time(std::localtime(&now_time_t), "%Y-%m-%d %H:%M:%S")
-                << "." << std::setfill('0') << std::setw(3) << now_ms.count() << "\",\n";
-    json_output << "  \"deadlock_count\": " << detected_deadlocks.size() << ",\n";
-    json_output << "  \"lock_stats\": [\n";
-    
-    bool first_lock = true;
-    for (const auto& [addr, stats] : lock_stats) {
-        if (!first_lock) json_output << ",\n";
-        first_lock = false;
-        
-        json_output << "    {\n";
-        json_output << "      \"lock_address\": \"" << to_hex_string(stats.lock_address) << "\",\n";
-        json_output << "      \"current_owner\": \"" << stats.current_owner << "\",\n";
-        json_output << "      \"total_acquisitions\": " << stats.total_acquisitions << ",\n";
-        json_output << "      \"waiters_count\": " << stats.waiters_count << ",\n";
-        json_output << "      \"avg_wait_time_ns\": " << stats.avg_wait_time_ns << ",\n";
-        json_output << "      \"waiting_threads\": [";
-        
-        bool first_thread = true;
-        for (const std::string& tid : stats.waiting_threads) {
-            if (!first_thread) json_output << ", ";
-            first_thread = false;
-            json_output << "\"" << tid << "\"";
-        }
-        json_output << "],\n";
-        
-        auto first_seen_time_t = std::chrono::system_clock::to_time_t(stats.first_seen_time);
-        auto first_seen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            stats.first_seen_time.time_since_epoch()) % 1000;
-        auto last_acquire_time_t = std::chrono::system_clock::to_time_t(stats.last_acquire_time);
-        auto last_acquire_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            stats.last_acquire_time.time_since_epoch()) % 1000;
-        
-        json_output << "      \"first_seen_time\": \"" << std::put_time(std::localtime(&first_seen_time_t), "%Y-%m-%d %H:%M:%S")
-                    << "." << std::setfill('0') << std::setw(3) << first_seen_ms.count() << "\",\n";
-        json_output << "      \"last_acquire_time\": \"" << std::put_time(std::localtime(&last_acquire_time_t), "%Y-%m-%d %H:%M:%S")
-                    << "." << std::setfill('0') << std::setw(3) << last_acquire_ms.count() << "\",\n";
-        json_output << "      \"deadlock_resolution_attempts\": " << stats.deadlock_resolution_attempts << ",\n";
-        json_output << "      \"successful_resolutions\": " << stats.successful_resolutions << "\n";
-        json_output << "    }";
-    }
-    
-    json_output << "\n  ]\n";
-    json_output << "}\n";
-    json_output.flush();
-    
-    printf("[STATS] Lock statistics saved to JSON\n");
 }
 
 void on_lock(pid_t tid, uint64_t addr) {
@@ -761,13 +908,8 @@ void on_lock(pid_t tid, uint64_t addr) {
 
     std::string thread_name = get_thread_identifier(tid);
     
-    if (lock_to_resource_copies.count(addr) && !lock_to_resource_copies[addr].empty()) {
-        printf("\033[1;34m[LOCK WITH COPY] %s acquired lock at %s (%zu resource copies available)\033[0m\n", 
-               thread_name.c_str(), to_hex_string(addr).c_str(), lock_to_resource_copies[addr].size());
-    } else {
-        printf("\033[32m[LOCK]\033[0m %s acquired lock at %s\n", 
-               thread_name.c_str(), to_hex_string(addr).c_str());
-    }
+    printf("\033[32m[LOCK]\033[0m %s acquired lock at %s\n", 
+           thread_name.c_str(), to_hex_string(addr).c_str());
 
     lock_owners[addr] = thread_name;
     thread_locks[thread_name].insert(addr);
@@ -784,7 +926,6 @@ void on_lock(pid_t tid, uint64_t addr) {
     }
     
     update_lock_stats(addr, thread_name);
-    save_lock_stats_to_json();
 }
 
 void on_wait(pid_t tid, uint64_t addr) {
@@ -792,12 +933,6 @@ void on_wait(pid_t tid, uint64_t addr) {
 
     std::string thread_name = get_thread_identifier(tid);
     
-    // Check if thread already owns this lock (potential recursive lock)
-    if (thread_locks[thread_name].count(addr)) {
-        printf("\033[33m[WARNING]\033[0m %s already owns lock %s (recursive lock?)\n", 
-               thread_name.c_str(), to_hex_string(addr).c_str());
-    }
-
     futex_waiters[addr].push_back(thread_name);
     wait_start_times[thread_name][addr] = Clock::now();
     
@@ -808,7 +943,6 @@ void on_wait(pid_t tid, uint64_t addr) {
         std::string owner = lock_owners[addr];
         if (owner != thread_name) {
             waits_for[thread_name].insert(owner);
-            detect_deadlocks();
         }
     }
     
@@ -838,8 +972,6 @@ void on_wake(pid_t tid, uint64_t addr) {
 }
 
 void handle_syscall(pid_t tid) {
-    static std::unordered_map<pid_t, uint64_t> futex_uaddr;
-
     struct user_regs_struct regs;
     if (ptrace(PTRACE_GETREGS, tid, nullptr, &regs) == -1) {
         return;
@@ -854,7 +986,6 @@ void handle_syscall(pid_t tid) {
 
         if (op == FUTEX_WAIT) {
             on_wait(tid, uaddr);
-            futex_uaddr[tid] = uaddr;
         }
         else if (op == FUTEX_WAKE) {
             on_wake(tid, uaddr);
@@ -866,81 +997,98 @@ void handle_syscall(pid_t tid) {
 #endif
 }
 
-std::vector<pid_t> list_threads(pid_t pid) {
-    std::vector<pid_t> tids;
-    char path[64];
-    snprintf(path, sizeof(path), "/proc/%d/task", pid);
-
-    DIR *dir = opendir(path);
-    if (!dir) return tids;
-
-    struct dirent *ent;
-    while ((ent = readdir(dir)) != nullptr) {
-        if (ent->d_name[0] == '.') continue;
-        pid_t tid = atoi(ent->d_name);
-        tids.push_back(tid);
-        
-        get_thread_name(tid);
-    }
-
-    closedir(dir);
-    return tids;
-}
-
-void cleanup_resource_copies() {
-    for (auto& copy : resource_copies) {
-        if (copy.copy_addr != nullptr) {
-            free(copy.copy_addr);
-            copy.copy_addr = nullptr;
+// Add this debug function
+void debug_wait_for_graph() {
+    printf("\n[DEBUG] Wait-for graph:\n");
+    for (const auto& [waiter, waits] : waits_for) {
+        printf("  %s waits for:\n", waiter.c_str());
+        for (const auto& target : waits) {
+            printf("    -> %s\n", target.c_str());
         }
     }
-    resource_copies.clear();
-    lock_to_resource_copies.clear();
+    printf("\n[DEBUG] Lock owners:\n");
+    for (const auto& [lock, owner] : lock_owners) {
+        printf("  Lock %s owned by %s\n", to_hex_string(lock).c_str(), owner.c_str());
+    }
 }
 
-void cleanup_thread(pid_t tid) {
-    std::lock_guard<std::mutex> lock(thread_info_mutex);
+// Fix the detection logic in detect_and_resolve_deadlocks:
+void detect_and_resolve_deadlocks() {
+    if (!monitoring_active.load()) return;
     
-    auto it = thread_info_cache.find(tid);
-    if (it != thread_info_cache.end()) {
-        std::string thread_name = it->second.name;
-        
-        // Clean up thread data
-        waits_for.erase(thread_name);
-        thread_locks.erase(thread_name);
-        wait_start_times.erase(thread_name);
-        
-        // Remove thread from lock owners
-        for (auto it = lock_owners.begin(); it != lock_owners.end(); ) {
-            if (it->second == thread_name) {
-                it = lock_owners.erase(it);
-            } else {
-                ++it;
+    std::lock_guard<std::mutex> lock(output_mutex);
+    std::unordered_set<std::string> visited;
+    std::unordered_set<std::string> stack;
+    std::vector<std::string> cycle;
+
+    // DEBUG: Show current state
+    printf("\n[DEBUG] Checking for cycles...\n");
+    printf("  waits_for size: %zu\n", waits_for.size());
+    printf("  futex_waiters size: %zu\n", futex_waiters.size());
+    
+    for (const auto& [thread_name, waits_set] : waits_for) {
+        printf("  %s waits for %zu threads\n", thread_name.c_str(), waits_set.size());
+    }
+
+    for (auto &kv : waits_for) {
+        const std::string& thread_name = kv.first;
+        if (!visited.count(thread_name)) {
+            cycle.clear();
+            stack.clear();
+            
+            if (dfs_deadlock(thread_name, visited, stack, cycle)) {
+                std::reverse(cycle.begin(), cycle.end());
+                
+                // Make sure cycle is complete
+                if (cycle.size() >= 2) {
+                    // Check if first and last connect
+                    const std::string& first = cycle[0];
+                    const std::string& last = cycle.back();
+                    
+                    if (waits_for.count(last) && waits_for[last].count(first)) {
+                        // Complete cycle found
+                        bool is_new = true;
+                        for (const auto& existing : detected_deadlocks) {
+                            if (existing.cycle == cycle) {
+                                is_new = false;
+                                break;
+                            }
+                        }
+                        
+                        if (is_new) {
+                            deadlock_counter++;
+                            DeadlockInfo deadlock;
+                            deadlock.cycle = cycle;
+                            deadlock.involved_locks = find_locks_in_deadlock(cycle);
+                            deadlock.detection_time = std::chrono::system_clock::now();
+                            deadlock.deadlock_id = deadlock_counter;
+                            
+                            printf("\033[1;31m[DEADLOCK DETECTED] Cycle found!\033[0m\n");
+                            for (size_t i = 0; i < cycle.size(); i++) {
+                                printf("  %s -> %s\n", cycle[i].c_str(), 
+                                       cycle[(i + 1) % cycle.size()].c_str());
+                            }
+                            
+                            // Try Strategy 1 resolution
+                            if (resolve_deadlock_strategy1(deadlock)) {
+                                deadlock.resolved = true;
+                                printf("\033[1;32m✓ Deadlock #%zu resolved using Strategy 1\033[0m\n", deadlock_counter);
+                            } else {
+                                printf("\033[1;33mStrategy 1 failed, continuing monitoring\033[0m\n");
+                            }
+                            
+                            detected_deadlocks.push_back(deadlock);
+                        }
+                    }
+                }
             }
         }
-        
-        // Remove from cache
-        thread_info_cache.erase(it);
     }
 }
 
-void cleanup_json_files() {
-    if (deadlock_json_output.is_open()) {
-        deadlock_json_output << "\n]\n";
-        deadlock_json_output.close();
-    }
-    if (json_output.is_open()) {
-        json_output.close();
-    }
-    if (resolution_log.is_open()) {
-        resolution_log.close();
-    }
-    cleanup_resource_copies();
-}
-
+// ========== MAIN FUNCTION ==========
 void signal_handler(int sig) {
     printf("\n[*] Received signal %d, cleaning up...\n", sig);
-    cleanup_json_files();
     
     // Print summary
     printf("\n\033[1;36m╔══════════════════════════════════════════════════════════════════╗\033[0m\n");
@@ -949,35 +1097,14 @@ void signal_handler(int sig) {
     printf("\033[1;33m║ Total deadlocks detected:\033[0m %zu\n", detected_deadlocks.size());
     
     size_t resolved_count = 0;
-    size_t total_resolution_attempts = 0;
-    size_t successful_resolutions = 0;
-    
     for (const auto& deadlock : detected_deadlocks) {
         if (deadlock.resolved) resolved_count++;
-    }
-    
-    for (const auto& [addr, stats] : lock_stats) {
-        total_resolution_attempts += stats.deadlock_resolution_attempts;
-        successful_resolutions += stats.successful_resolutions;
     }
     
     printf("\033[1;33m║ Deadlocks resolved:\033[0m %zu/%zu\n", resolved_count, detected_deadlocks.size());
     printf("\033[1;33m║ Total threads tracked:\033[0m %zu\n", thread_info_cache.size());
     printf("\033[1;33m║ Total locks tracked:\033[0m %zu\n", lock_stats.size());
-    printf("\033[1;33m║ Resource copies created:\033[0m %zu\n", resource_copies.size());
-    printf("\033[1;33m║ Resolution attempts:\033[0m %zu\n", total_resolution_attempts);
-    printf("\033[1;33m║ Successful resolutions:\033[0m %zu\n", successful_resolutions);
-    
-    if (!detected_deadlocks.empty()) {
-        printf("\033[1;33m║ Last deadlock cycle:\033[0m ");
-        const auto& last = detected_deadlocks.back();
-        for (size_t i = 0; i < last.cycle.size(); i++) {
-            printf("\033[1;31m%s\033[0m", last.cycle[i].c_str());
-            if (i < last.cycle.size() - 1) printf(" → ");
-        }
-        printf(" (%s)\n", last.resolved ? "\033[1;32mresolved\033[0m" : "\033[1;31munresolved\033[0m");
-    }
-    
+    printf("\033[1;33m║ Shadow processes created:\033[0m %zu\n", shadow_processes.size());
     printf("\033[1;36m╚══════════════════════════════════════════════════════════════════╝\033[0m\n");
     
     exit(0);
@@ -993,69 +1120,48 @@ int main(int argc, char **argv) {
     signal(SIGTERM, signal_handler);
 
     target_pid = atoi(argv[1]);
+    printf("\033[1;36m[*] Deadlock Detector with Strategy 1 Resolution\033[0m\n");
     printf("\033[1;36m[*] Attaching to process %d\033[0m\n", target_pid);
-    printf("\033[1;36m[*] Using thread names instead of IDs\033[0m\n");
-    printf("\033[1;36m[*] Attempting automatic deadlock resolution with resource copying\033[0m\n");
+    printf("\033[1;36m[*] Strategy: Thread reconstitution in shadow process\033[0m\n");
     
-    json_output.open("lock_stats.json", std::ios::out | std::ios::trunc);
-    if (!json_output.is_open()) {
-        fprintf(stderr, "\033[33mWarning: Could not open lock_stats.json for writing\033[0m\n");
-    } else {
-        printf("\033[32m[*] JSON output will be saved to lock_stats.json\033[0m\n");
-    }
-
-    deadlock_json_output.open("deadlocks.json", std::ios::out | std::ios::trunc);
-    if (!deadlock_json_output.is_open()) {
-        fprintf(stderr, "\033[33mWarning: Could not open deadlocks.json for writing\033[0m\n");
-    } else {
-        printf("\033[32m[*] Deadlock reports will be saved to deadlocks.json\033[0m\n");
-        deadlock_json_output << "[\n";
-        deadlock_json_output.close();
-    }
-    
-    resolution_log.open("resolution.log", std::ios::out | std::ios::trunc);
-    if (!resolution_log.is_open()) {
-        fprintf(stderr, "\033[33mWarning: Could not open resolution.log for writing\033[0m\n");
-    } else {
-        printf("\033[32m[*] Resolution attempts logged to resolution.log\033[0m\n");
-    }
-
+    // Attach to all threads
     auto tids = list_threads(target_pid);
-
-    printf("\033[1;33m[*] Found %zu threads in process %d:\033[0m\n", tids.size(), target_pid);
     for (pid_t tid : tids) {
         if (ptrace(PTRACE_ATTACH, tid, nullptr, nullptr) == 0) {
-            waitpid(tid, nullptr, 0);
+            int status;
+            waitpid(tid, &status, __WALL);
             ptrace(PTRACE_SETOPTIONS, tid, nullptr,
                    PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL);
             ptrace(PTRACE_SYSCALL, tid, nullptr, nullptr);
-            printf("  \033[32m✓\033[0m attached %s\n", get_thread_identifier(tid).c_str());
-        } else {
-            printf("  \033[31m✗\033[0m failed to attach to TID %d\n", tid);
+            printf("  Attached to thread %d\n", tid);
         }
     }
 
-    printf("\n\033[1;36m[*] Monitoring thread interactions... (Ctrl+C to stop)\033[0m\n");
-    printf("\033[1;33m[*] Will attempt to break deadlocks by copying resources\033[0m\n\n");
+    printf("\n\033[1;36m[*] Monitoring started. Detected deadlocks will be automatically resolved.\033[0m\n");
+    printf("\033[1;33m[*] Press Ctrl+C to stop and see summary\033[0m\n\n");
     
     while (true) {
+        if (!monitoring_active.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+        
         int status;
         pid_t tid = waitpid(-1, &status, __WALL);
         if (tid <= 0) continue;
 
         if (WIFEXITED(status) || WIFSIGNALED(status)) {
             printf("\033[90m[*] %s exited\033[0m\n", get_thread_identifier(tid).c_str());
-            cleanup_thread(tid);
             continue;
         }
 
         if (status >> 8 == (SIGTRAP | 0x80)) {
             handle_syscall(tid);
+            detect_and_resolve_deadlocks();
         }
 
         ptrace(PTRACE_SYSCALL, tid, nullptr, nullptr);
     }
     
-    cleanup_json_files();
     return 0;
 }
