@@ -1,32 +1,39 @@
+import java.util.concurrent.locks.*;
+
 public class Main {
-    private static final Object lock = new Object();
-
+    static final Lock A = new ReentrantLock();
+    static final Lock B = new ReentrantLock();
+    static volatile boolean run = true;
+    static int count = 0;
+    
     public static void main(String[] args) throws Exception {
-        long pid = ProcessHandle.current().pid();
-        System.out.println("Java Process PID: " + pid);
-
-        Thread t1 = new Thread(() -> {
-            synchronized (lock) {
-                try {
-                    System.out.println("Worker-1 acquired lock, waiting...");
-                    lock.wait(); // WAIT on lock
-                    System.out.println("Worker-1 resumed!");
-                } catch (InterruptedException e) {}
+        // Thread 1: A -> B
+        new Thread(() -> {
+            while (run) {
+                A.lock();
+                try { Thread.sleep(10); } catch (Exception e) {}
+                B.lock();
+                count++;
+                B.unlock();
+                A.unlock();
             }
-        }, "Worker-1");
-
-        Thread t2 = new Thread(() -> {
-            try { Thread.sleep(1000); } catch (InterruptedException e) {}
-            synchronized (lock) {
-                System.out.println("Worker-2 acquired lock, notifying...");
-                lock.notify(); // WAKE Worker-1
+        }).start();
+        
+        // Thread 2: B -> A  
+        new Thread(() -> {
+            while (run) {
+                B.lock();
+                try { Thread.sleep(10); } catch (Exception e) {}
+                A.lock();
+                count++;
+                A.unlock();
+                B.unlock();
             }
-        }, "Worker-2");
-
-        t1.start();
-        t2.start();
-
-        // Keep main thread alive for 20 seconds so agent can attach
-        Thread.sleep(20000);
+        }).start();
+        
+        Thread.sleep(10000);
+        run = false;
+        Thread.sleep(1000);
+        System.out.println("Count: " + count);
     }
 }

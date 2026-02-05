@@ -1,88 +1,120 @@
 import threading
 import time
-import random
-from queue import Queue
 
-# -------------------- Shared resources --------------------
+# -------------------- Locks --------------------
 lock_a = threading.Lock()
 lock_b = threading.Lock()
 lock_c = threading.Lock()
 lock_d = threading.Lock()
-shared_counter = [0]  # simulate memory access
-message_queue = Queue()
 
-RUNNING = True
+# -------------------- Deadlock scenarios --------------------
+def classic_deadlock():
+    """Classic AB-BA deadlock between two threads"""
+    tid = threading.get_ident()
+    if tid % 2 == 0:
+        lock_a.acquire()
+        time.sleep(0.2)
+        lock_b.acquire()
+        lock_b.release()
+        lock_a.release()
+    else:
+        lock_b.acquire()
+        time.sleep(0.2)
+        lock_a.acquire()
+        lock_a.release()
+        lock_b.release()
 
-# -------------------- Worker functions --------------------
+def circular_deadlock():
+    """Circular deadlock between 4 threads and 4 locks"""
+    tid = threading.get_ident() % 1000
+    if tid % 4 == 0:
+        lock_a.acquire()
+        time.sleep(0.1)
+        lock_b.acquire()
+        time.sleep(0.1)
+        lock_c.acquire()
+        time.sleep(0.1)
+        lock_d.acquire()
+        lock_d.release()
+        lock_c.release()
+        lock_b.release()
+        lock_a.release()
+    elif tid % 4 == 1:
+        lock_b.acquire()
+        time.sleep(0.1)
+        lock_c.acquire()
+        time.sleep(0.1)
+        lock_d.acquire()
+        time.sleep(0.1)
+        lock_a.acquire()
+        lock_a.release()
+        lock_d.release()
+        lock_c.release()
+        lock_b.release()
+    elif tid % 4 == 2:
+        lock_c.acquire()
+        time.sleep(0.1)
+        lock_d.acquire()
+        time.sleep(0.1)
+        lock_a.acquire()
+        time.sleep(0.1)
+        lock_b.acquire()
+        lock_b.release()
+        lock_a.release()
+        lock_d.release()
+        lock_c.release()
+    else:
+        lock_d.acquire()
+        time.sleep(0.1)
+        lock_a.acquire()
+        time.sleep(0.1)
+        lock_b.acquire()
+        time.sleep(0.1)
+        lock_c.acquire()
+        lock_c.release()
+        lock_b.release()
+        lock_a.release()
+        lock_d.release()
 
-def worker_a():
-    while RUNNING:
-        with lock_a:
-            shared_counter[0] += 1
-            time.sleep(random.uniform(0.001, 0.005))
-        # send messages randomly
-        if random.random() < 0.3:
-            message_queue.put("A->B")
-        time.sleep(random.uniform(0.001, 0.01))
+def nested_deadlock():
+    """Nested lock deadlock"""
+    def inner1():
+        lock_a.acquire()
+        time.sleep(0.05)
+        lock_b.acquire()
+        lock_b.release()
+        lock_a.release()
 
-def worker_b():
-    while RUNNING:
-        with lock_b:
-            shared_counter[0] += 1
-            time.sleep(random.uniform(0.001, 0.005))
-        # receive messages
-        if not message_queue.empty() and random.random() < 0.5:
-            _ = message_queue.get()
-        time.sleep(random.uniform(0.001, 0.01))
+    def inner2():
+        lock_b.acquire()
+        time.sleep(0.05)
+        lock_a.acquire()
+        lock_a.release()
+        lock_b.release()
 
-def worker_c():
-    while RUNNING:
-        # Acquire two random locks in random order to create contention
-        locks = random.sample([lock_a, lock_b, lock_c, lock_d], 2)
-        first, second = locks[0], locks[1]
-        with first:
-            time.sleep(random.uniform(0.001, 0.003))
-            with second:
-                shared_counter[0] += 1
-                time.sleep(random.uniform(0.001, 0.003))
+    tid = threading.get_ident()
+    if tid % 2 == 0:
+        inner1()
+    else:
+        inner2()
 
-def worker_d():
-    while RUNNING:
-        # Random lock/unlock pattern
-        lock = random.choice([lock_a, lock_b, lock_c, lock_d])
-        with lock:
-            shared_counter[0] += 1
-            time.sleep(random.uniform(0.001, 0.004))
+# -------------------- Worker threads --------------------
+def worker_deadlock():
+    while True:
+        classic_deadlock()
+        circular_deadlock()
+        nested_deadlock()
+        time.sleep(0.1)
 
-def worker_e():
-    while RUNNING:
-        # Try to acquire three locks in random order (to increase deadlock chance)
-        locks = random.sample([lock_a, lock_b, lock_c, lock_d], 3)
-        with locks[0]:
-            time.sleep(random.uniform(0.001, 0.002))
-            with locks[1]:
-                time.sleep(random.uniform(0.001, 0.002))
-                with locks[2]:
-                    shared_counter[0] += 1
-                    time.sleep(random.uniform(0.001, 0.002))
-
-# -------------------- Start threads --------------------
+# -------------------- Main --------------------
 threads = []
-for f in [worker_a, worker_b, worker_c, worker_d, worker_e]:
-    t = threading.Thread(target=f)
+
+# Start 6 worker threads to generate deadlocks
+for _ in range(6):
+    t = threading.Thread(target=worker_deadlock, daemon=True)
     t.start()
     threads.append(t)
 
-# Run for ~2 minutes
-start = time.time()
-while time.time() - start < 120:
-    time.sleep(0.1)
-
-# Stop threads
-RUNNING = False
-
-# Join threads
-for t in threads:
-    t.join()
-
-print("Done! Shared counter =", shared_counter[0])
+# Keep main thread alive
+while True:
+    time.sleep(1)

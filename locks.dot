@@ -2,16 +2,14 @@ digraph LockGraph {
   rankdir=LR;
   node [style=filled, color=lightblue];
 
-  T12698 [label="TID 12698", shape=ellipse];
-  T12699 [label="TID 12699", shape=ellipse];
-  T12697 [label="TID 12697", shape=ellipse];
-  L139855108907708 [label="0x7f328e1622bc", shape=box];
-  L139855108907720 [label="0x7f328e1622c8", shape=box];
-  L139855108907704 [label="0x7f328e1622b8", shape=box];
+  T21790 [label="TID 21790", shape=ellipse];
+  T21789 [label="TID 21789", shape=ellipse];
+  L140060883559096 [label="0x7f62773622b8", shape=box];
+  L140060883559100 [label="0x7f62773622bc", shape=box];
+  L140060883559112 [label="0x7f62773622c8", shape=box];
 
-  T12698 -> L139855108907708 [label="owns", color=green];
-  T12698 -> L139855108907720 [label="owns", color=green];
-  T12697 -> L139855108907704 [label="owns", color=green];
-  T12699 -> T12698 [label="waits", color=red];
-  T12699 -> T12697 [label="waits", color=red];
+  T21789 -> L140060883559096 [label="owns", color=green];
+  T21790 -> L140060883559100 [label="owns", color=green];
+  T21790 -> L140060883559112 [label="owns", color=green];
+  T21789 -> T21790 [label="waits", color=red];
 }
