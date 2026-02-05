@@ -568,8 +568,8 @@ std::string choose_victim_thread(const DeadlockInfo& deadlock) {
 
 
 bool eliminate_other_threads_in_shadow(pid_t victim_tid) {
-    printf("\033[1;33m[STEP 5] Eliminating non-victim threads...\033[0m\n");
-    
+    printf("\033[1;33m[STEP 5] Pausing non-victim threads safely...\033[0m\n");
+
     // Get list of all threads in this process
     std::vector<pid_t> all_tids;
     DIR* dir = opendir("/proc/self/task");
@@ -577,7 +577,7 @@ bool eliminate_other_threads_in_shadow(pid_t victim_tid) {
         perror("opendir failed");
         return false;
     }
-    
+
     struct dirent* ent;
     while ((ent = readdir(dir)) != nullptr) {
         if (ent->d_name[0] == '.') continue;
@@ -585,62 +585,96 @@ bool eliminate_other_threads_in_shadow(pid_t victim_tid) {
         all_tids.push_back(tid);
     }
     closedir(dir);
-    
+
     printf("  Found %zu threads total\n", all_tids.size());
-    
-    // Kill all threads except ourselves and victim
+
+    // Pause all threads except ourselves and victim
     for (pid_t tid : all_tids) {
-        if (tid == getpid() || tid == victim_tid) continue;
-        
+        if (tid == getpid()) {
+            printf("    Skipping ourselves (PID=%d)\n", tid);
+            continue;
+        }
         if (tid == victim_tid) {
             printf("    Skipping victim (TID=%d)\n", tid);
             continue;
         }
-    
+
         if (tgkill(getpid(), tid, SIGSTOP) == -1) {
-            perror("Failed to suspend thread");
+            printf("    Failed to suspend thread %d: %s\n", tid, strerror(errno));
         } else {
-            printf("  Suspended thread %d\n", tid);
+            printf("    Suspended thread %d\n", tid);
         }
     }
-    
-    // Wait for threads to die
-    usleep(100000); // 100ms
-    
-    // Check what remains
-    all_tids.clear();
-    dir = opendir("/proc/self/task");
-    if (dir) {
-        while ((ent = readdir(dir)) != nullptr) {
-            if (ent->d_name[0] == '.') continue;
-            pid_t tid = atoi(ent->d_name);
-            all_tids.push_back(tid);
-        }
-        closedir(dir);
-    }
-    
-    printf("  %zu threads remain after elimination\n", all_tids.size());
+
+    // Give threads a moment to stop
+    usleep(50000); // 50ms
+
+    // Verify suspended threads
+    size_t remaining_running = 0;
     for (pid_t tid : all_tids) {
-        printf("    Thread %d\n", tid);
-    }
-    
-    // Check if victim is still there
-    bool victim_alive = false;
-    for (pid_t tid : all_tids) {
-        if (tid == victim_tid) {
-            victim_alive = true;
-            break;
+        if (tid == getpid() || tid == victim_tid) continue;
+        char path[256];
+        snprintf(path, sizeof(path), "/proc/self/task/%d/status", tid);
+        FILE* f = fopen(path, "r");
+        if (!f) continue;
+        char line[256];
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "State:", 6) == 0) {
+                // T = stopped
+                if (strchr(line, 'T') == nullptr) {
+                    remaining_running++;
+                }
+                break;
+            }
         }
+        fclose(f);
     }
-    
-    if (victim_alive && all_tids.size() <= 2) { // Victim + ourselves
-        printf("  ✓ Victim isolated\n");
+
+    if (remaining_running == 0) {
+        printf("  ✓ All non-victim threads safely paused\n");
         return true;
     } else {
-        printf("  ✗ Failed to isolate victim\n");
+        printf("  ✗ Some threads failed to pause (%zu remaining)\n", remaining_running);
         return false;
     }
 }
+
+void resume_paused_threads(pid_t victim_tid) {
+    printf("\033[1;33m[STEP 11] Resuming previously paused threads...\033[0m\n");
+
+    // Get list of all threads
+    std::vector<pid_t> all_tids;
+    DIR* dir = opendir("/proc/self/task");
+    if (!dir) {
+        perror("opendir failed");
+        return;
+    }
+
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != nullptr) {
+        if (ent->d_name[0] == '.') continue;
+        pid_t tid = atoi(ent->d_name);
+        all_tids.push_back(tid);
+    }
+    closedir(dir);
+
+    // Resume all threads except ourselves
+    for (pid_t tid : all_tids) {
+        if (tid == getpid()) continue;        // Skip monitoring thread
+        // Victim thread is already running, safe to send SIGCONT anyway
+        if (tgkill(getpid(), tid, SIGCONT) == -1) {
+            printf("    Failed to resume thread %d: %s\n", tid, strerror(errno));
+        } else {
+            printf("    Resumed thread %d\n", tid);
+        }
+    }
+
+    // Small delay to let threads continue
+    usleep(50000); // 50ms
+
+    printf("  ✓ All threads resumed\n");
+}
+
 
 std::vector<MemoryRegion> initialize_private_memory(const std::vector<uint64_t>& locks) {
     printf("\033[1;33m[STEP 6] Initializing private-memory machinery...\033[0m\n");
@@ -845,34 +879,35 @@ bool resolve_deadlock_strategy1(const DeadlockInfo& deadlock) {
     } else if (shadow > 0) {
         // PARENT PROCESS
         printf("  Shadow PID: %d\n", shadow);
-        
-        // Wait for shadow
+
+        // Wait for shadow process to finish
         int status;
         waitpid(shadow, &status, 0);
-        
+
+        // --- Add this line ---
+        resume_paused_threads(victim_tid);
+        // --- Resume paused threads safely ---
+
         // Clean data structures
         waits_for.erase(victim_name);
         thread_locks.erase(victim_name);
-        
+
         for (uint64_t lock_addr : deadlock.involved_locks) {
             auto it = lock_owners.find(lock_addr);
             if (it != lock_owners.end() && it->second == victim_name) {
                 lock_owners.erase(it);
             }
         }
-        
+
         for (auto& [lock_addr, waiters] : futex_waiters) {
             waiters.erase(std::remove(waiters.begin(), waiters.end(), victim_name), waiters.end());
         }
-        
-        // SIMPLE RECOVERY: Just continue monitoring without re-attaching
-        // The program will continue running, we just won't trace it anymore
+
         printf("\033[1;32m[✓] Deadlock resolved! Program continues without tracing.\033[0m\n");
-        
+
         // Exit cleanly
         printf("[*] Agent exiting after successful resolution\n");
         exit(0);
-        
     } else {
         perror("fork failed");
         monitoring_active.store(true);
