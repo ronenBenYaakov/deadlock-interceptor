@@ -5,7 +5,13 @@
 #include <vector>
 #include <cstdint>
 #include <sys/types.h>
-#include "deadlock_resolver.h"
+
+struct MemoryRegion {
+    uint64_t start;
+    uint64_t end;
+    std::string perms;
+    std::string name;
+};
 
 std::string to_hex_string(uint64_t value);
 std::string get_thread_name(pid_t tid);

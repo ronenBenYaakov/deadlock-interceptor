@@ -1,44 +1,44 @@
 [
 {
   "directory": "/home/geoff/memory-managment-projects/deadlock-interceptor/build",
-  "command": "/usr/bin/c++  -I/home/geoff/memory-managment-projects/deadlock-interceptor/include -std=c++17 -Wall -Wextra -Wpedantic -o CMakeFiles/deadlock-interceptor.dir/src/main.cpp.o -c /home/geoff/memory-managment-projects/deadlock-interceptor/src/main.cpp",
+  "command": "/usr/bin/c++ -I/home/geoff/memory-managment-projects/deadlock-interceptor/include -g -std=c++17 -Wall -Wextra -Wpedantic -o CMakeFiles/deadlock-interceptor.dir/src/main.cpp.o -c /home/geoff/memory-managment-projects/deadlock-interceptor/src/main.cpp",
   "file": "/home/geoff/memory-managment-projects/deadlock-interceptor/src/main.cpp",
-  "output": "CMakeFiles/deadlock-interceptor.dir/src/main.cpp.o"
+  "output": "/home/geoff/memory-managment-projects/deadlock-interceptor/build/CMakeFiles/deadlock-interceptor.dir/src/main.cpp.o"
 },
 {
   "directory": "/home/geoff/memory-managment-projects/deadlock-interceptor/build",
-  "command": "/usr/bin/c++  -I/home/geoff/memory-managment-projects/deadlock-interceptor/include -std=c++17 -Wall -Wextra -Wpedantic -o CMakeFiles/deadlock-interceptor.dir/src/detection.cpp.o -c /home/geoff/memory-managment-projects/deadlock-interceptor/src/detection.cpp",
+  "command": "/usr/bin/c++ -I/home/geoff/memory-managment-projects/deadlock-interceptor/include -g -std=c++17 -Wall -Wextra -Wpedantic -o CMakeFiles/deadlock-interceptor.dir/src/detection.cpp.o -c /home/geoff/memory-managment-projects/deadlock-interceptor/src/detection.cpp",
   "file": "/home/geoff/memory-managment-projects/deadlock-interceptor/src/detection.cpp",
-  "output": "CMakeFiles/deadlock-interceptor.dir/src/detection.cpp.o"
+  "output": "/home/geoff/memory-managment-projects/deadlock-interceptor/build/CMakeFiles/deadlock-interceptor.dir/src/detection.cpp.o"
 },
 {
   "directory": "/home/geoff/memory-managment-projects/deadlock-interceptor/build",
-  "command": "/usr/bin/c++  -I/home/geoff/memory-managment-projects/deadlock-interceptor/include -std=c++17 -Wall -Wextra -Wpedantic -o CMakeFiles/deadlock-interceptor.dir/src/helpers.cpp.o -c /home/geoff/memory-managment-projects/deadlock-interceptor/src/helpers.cpp",
+  "command": "/usr/bin/c++ -I/home/geoff/memory-managment-projects/deadlock-interceptor/include -g -std=c++17 -Wall -Wextra -Wpedantic -o CMakeFiles/deadlock-interceptor.dir/src/helpers.cpp.o -c /home/geoff/memory-managment-projects/deadlock-interceptor/src/helpers.cpp",
   "file": "/home/geoff/memory-managment-projects/deadlock-interceptor/src/helpers.cpp",
-  "output": "CMakeFiles/deadlock-interceptor.dir/src/helpers.cpp.o"
+  "output": "/home/geoff/memory-managment-projects/deadlock-interceptor/build/CMakeFiles/deadlock-interceptor.dir/src/helpers.cpp.o"
 },
 {
   "directory": "/home/geoff/memory-managment-projects/deadlock-interceptor/build",
-  "command": "/usr/bin/c++  -I/home/geoff/memory-managment-projects/deadlock-interceptor/include -std=c++17 -Wall -Wextra -Wpedantic -o CMakeFiles/deadlock-interceptor.dir/src/memory_duplication.cpp.o -c /home/geoff/memory-managment-projects/deadlock-interceptor/src/memory_duplication.cpp",
+  "command": "/usr/bin/c++ -I/home/geoff/memory-managment-projects/deadlock-interceptor/include -g -std=c++17 -Wall -Wextra -Wpedantic -o CMakeFiles/deadlock-interceptor.dir/src/memory_duplication.cpp.o -c /home/geoff/memory-managment-projects/deadlock-interceptor/src/memory_duplication.cpp",
   "file": "/home/geoff/memory-managment-projects/deadlock-interceptor/src/memory_duplication.cpp",
-  "output": "CMakeFiles/deadlock-interceptor.dir/src/memory_duplication.cpp.o"
+  "output": "/home/geoff/memory-managment-projects/deadlock-interceptor/build/CMakeFiles/deadlock-interceptor.dir/src/memory_duplication.cpp.o"
 },
 {
   "directory": "/home/geoff/memory-managment-projects/deadlock-interceptor/build",
-  "command": "/usr/bin/c++  -I/home/geoff/memory-managment-projects/deadlock-interceptor/include -std=c++17 -Wall -Wextra -Wpedantic -o CMakeFiles/deadlock-interceptor.dir/src/monitoring.cpp.o -c /home/geoff/memory-managment-projects/deadlock-interceptor/src/monitoring.cpp",
+  "command": "/usr/bin/c++ -I/home/geoff/memory-managment-projects/deadlock-interceptor/include -g -std=c++17 -Wall -Wextra -Wpedantic -o CMakeFiles/deadlock-interceptor.dir/src/monitoring.cpp.o -c /home/geoff/memory-managment-projects/deadlock-interceptor/src/monitoring.cpp",
   "file": "/home/geoff/memory-managment-projects/deadlock-interceptor/src/monitoring.cpp",
-  "output": "CMakeFiles/deadlock-interceptor.dir/src/monitoring.cpp.o"
+  "output": "/home/geoff/memory-managment-projects/deadlock-interceptor/build/CMakeFiles/deadlock-interceptor.dir/src/monitoring.cpp.o"
 },
 {
   "directory": "/home/geoff/memory-managment-projects/deadlock-interceptor/build",
-  "command": "/usr/bin/c++  -I/home/geoff/memory-managment-projects/deadlock-interceptor/include -std=c++17 -Wall -Wextra -Wpedantic -o CMakeFiles/deadlock-interceptor.dir/src/snapshot.cpp.o -c /home/geoff/memory-managment-projects/deadlock-interceptor/src/snapshot.cpp",
+  "command": "/usr/bin/c++ -I/home/geoff/memory-managment-projects/deadlock-interceptor/include -g -std=c++17 -Wall -Wextra -Wpedantic -o CMakeFiles/deadlock-interceptor.dir/src/snapshot.cpp.o -c /home/geoff/memory-managment-projects/deadlock-interceptor/src/snapshot.cpp",
   "file": "/home/geoff/memory-managment-projects/deadlock-interceptor/src/snapshot.cpp",
-  "output": "CMakeFiles/deadlock-interceptor.dir/src/snapshot.cpp.o"
+  "output": "/home/geoff/memory-managment-projects/deadlock-interceptor/build/CMakeFiles/deadlock-interceptor.dir/src/snapshot.cpp.o"
 },
 {
   "directory": "/home/geoff/memory-managment-projects/deadlock-interceptor/build",
-  "command": "/usr/bin/c++  -I/home/geoff/memory-managment-projects/deadlock-interceptor/include -std=c++17 -Wall -Wextra -Wpedantic -o CMakeFiles/deadlock-interceptor.dir/src/strategy1.cpp.o -c /home/geoff/memory-managment-projects/deadlock-interceptor/src/strategy1.cpp",
+  "command": "/usr/bin/c++ -I/home/geoff/memory-managment-projects/deadlock-interceptor/include -g -std=c++17 -Wall -Wextra -Wpedantic -o CMakeFiles/deadlock-interceptor.dir/src/strategy1.cpp.o -c /home/geoff/memory-managment-projects/deadlock-interceptor/src/strategy1.cpp",
   "file": "/home/geoff/memory-managment-projects/deadlock-interceptor/src/strategy1.cpp",
-  "output": "CMakeFiles/deadlock-interceptor.dir/src/strategy1.cpp.o"
+  "output": "/home/geoff/memory-managment-projects/deadlock-interceptor/build/CMakeFiles/deadlock-interceptor.dir/src/strategy1.cpp.o"
 }
 ]

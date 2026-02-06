@@ -2,26 +2,79 @@
 #define DEADLOCK_RESOLVER_H
 
 #include <sys/types.h>
-#include <sys/user.h>  // Add this for user_regs_struct
+#include <sys/user.h>
 #include <chrono>
 #include <string>
 #include <vector>
+#include <helpers.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <atomic>
 
-// Forward declaration for FPU state (platform-specific)
-// We'll handle this differently
+struct ConflictGroup {
+    size_t group_id;
+    std::unordered_set<std::string> threads;  // Threads in this group
+    std::unordered_set<uint64_t> locks_held;  // Locks held by threads in this group
+    std::unordered_set<uint64_t> locks_wanted; // Locks wanted by threads in this group
+    std::unordered_set<size_t> conflicting_groups; // Groups that conflict with this one
+    
+    bool conflicts_with(const ConflictGroup& other) const {
+        // Groups conflict if they want locks held by each other
+        for (uint64_t lock : locks_held) {
+            if (other.locks_wanted.count(lock)) return true;
+        }
+        for (uint64_t lock : locks_wanted) {
+            if (other.locks_held.count(lock)) return true;
+        }
+        return false;
+    }
+    
+    std::string to_string() const {
+        std::string result = "Group " + std::to_string(group_id) + ": ";
+        result += "[Threads: ";
+        for (const auto& t : threads) {
+            result += t + " ";
+        }
+        result += "] [Held: ";
+        for (uint64_t lock : locks_held) {
+            result += to_hex_string(lock) + " ";
+        }
+        result += "] [Wanted: ";
+        for (uint64_t lock : locks_wanted) {
+            result += to_hex_string(lock) + " ";
+        }
+        result += "]";
+        return result;
+    }
+};
+
+struct GroupResolution {
+    size_t group_id;
+    std::unordered_set<std::string> threads;
+    std::unordered_set<uint64_t> held_locks;
+    std::unordered_set<uint64_t> wanted_locks;
+    std::unordered_set<size_t> conflicting_groups;
+    std::string selected_victim;
+    pid_t victim_tid;
+    bool resolved = false;
+    std::chrono::system_clock::time_point resolution_time;
+};
+
+struct GroupDeadlockInfo {
+    std::vector<size_t> group_cycle;
+    std::vector<std::string> thread_cycle;
+    std::vector<uint64_t> involved_locks;
+    std::chrono::system_clock::time_point detection_time;
+    size_t deadlock_id;
+    bool resolved = false;
+    std::vector<GroupResolution> group_resolutions;
+};
+
 struct FPUStateWrapper;
 
 using Clock = std::chrono::steady_clock;
 
-struct MemoryRegion {
-    uint64_t start;
-    uint64_t end;
-    std::string perms;
-    std::string name;
-};
+
 
 struct ThreadSnapshot {
     struct user_regs_struct regs;  // Now complete type

@@ -38,6 +38,24 @@ std::mutex output_mutex;
 void signal_handler(int sig) {
     std::cout << "\n[*] Received signal " << sig << ", cleaning up...\n";
     
+    // Run final analysis before exit
+    std::cout << "\n\033[1;35m[FINAL CONFLICT ANALYSIS]\033[0m\n";
+    
+    // Show wait-for graph
+    std::cout << "\033[1;33mFinal Wait-For Graph:\033[0m\n";
+    for (const auto& [waiter, waits] : waits_for) {
+        std::cout << "  " << waiter << " waits for: ";
+        for (const auto& target : waits) {
+            std::cout << target << " ";
+        }
+        std::cout << "\n";
+    }
+    
+    // Show conflict groups
+    std::vector<ConflictGroup> groups;
+    // We need to declare analyze_conflict_groups function first
+    // For now, just show basic info
+    
     std::cout << "\n\033[1;36m╔══════════════════════════════════════════════════════════════════╗\033[0m\n";
     std::cout << "\033[1;36m║                         MONITORING SUMMARY                        ║\033[0m\n";
     std::cout << "\033[1;36m╠══════════════════════════════════════════════════════════════════╣\033[0m\n";
@@ -52,19 +70,38 @@ void signal_handler(int sig) {
     std::cout << "\033[1;33m║ Total threads tracked:\033[0m " << thread_info_cache.size() << "\n";
     std::cout << "\033[1;33m║ Total locks tracked:\033[0m " << lock_stats.size() << "\n";
     std::cout << "\033[1;33m║ Shadow processes created:\033[0m " << shadow_processes.size() << "\n";
+    
+    // Show conflict statistics
+    std::cout << "\033[1;33m║ Active wait-for relationships:\033[0m " << waits_for.size() << "\n";
+    std::cout << "\033[1;33m║ Threads holding locks:\033[0m " << thread_locks.size() << "\n";
+    
     std::cout << "\033[1;36m╚══════════════════════════════════════════════════════════════════╝\033[0m\n";
     
     exit(0);
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2) {
-        std::cerr << "usage: " << argv[0] << " <pid>\n";
+    if (argc < 2) {
+        std::cerr << "usage: " << argv[0] << " <pid> [strategy]\n";
+        std::cerr << "strategies:\n";
+        std::cerr << "  auto      - Automatic detection (default)\n";
+        std::cerr << "  group     - Group-by-group resolution\n";
+        std::cerr << "  single    - Single-thread resolution\n";
         return 1;
     }
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+
+    target_pid = atoi(argv[1]);
+    std::string strategy = "auto";
+    if (argc >= 3) {
+        strategy = argv[2];
+    }
+    
+    std::cout << "\033[1;36m[*] Deadlock Detector\033[0m\n";
+    std::cout << "\033[1;36m[*] Attaching to process " << target_pid << "\033[0m\n";
+    std::cout << "\033[1;36m[*] Strategy: " << strategy << "\033[0m\n";
 
     target_pid = atoi(argv[1]);
     std::cout << "\033[1;36m[*] Deadlock Detector with Strategy 1 Resolution\033[0m\n";
