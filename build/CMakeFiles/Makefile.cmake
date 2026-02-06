@@ -8,10 +8,8 @@ set(CMAKE_DEPENDS_GENERATOR "Unix Makefiles")
 set(CMAKE_MAKEFILE_DEPENDS
   "CMakeCache.txt"
   "/home/geoff/memory-managment-projects/deadlock-interceptor/CMakeLists.txt"
-  "CMakeFiles/4.2.2/CMakeCCompiler.cmake"
   "CMakeFiles/4.2.2/CMakeCXXCompiler.cmake"
   "CMakeFiles/4.2.2/CMakeSystem.cmake"
-  "/usr/share/cmake/Modules/CMakeCInformation.cmake"
   "/usr/share/cmake/Modules/CMakeCXXInformation.cmake"
   "/usr/share/cmake/Modules/CMakeCommonLanguageInclude.cmake"
   "/usr/share/cmake/Modules/CMakeGenericSystem.cmake"
@@ -20,20 +18,15 @@ set(CMAKE_MAKEFILE_DEPENDS
   "/usr/share/cmake/Modules/CMakeSystemSpecificInformation.cmake"
   "/usr/share/cmake/Modules/CMakeSystemSpecificInitialize.cmake"
   "/usr/share/cmake/Modules/Compiler/CMakeCommonCompilerMacros.cmake"
-  "/usr/share/cmake/Modules/Compiler/GNU-C.cmake"
   "/usr/share/cmake/Modules/Compiler/GNU-CXX.cmake"
   "/usr/share/cmake/Modules/Compiler/GNU.cmake"
-  "/usr/share/cmake/Modules/Internal/CMakeCLinkerInformation.cmake"
   "/usr/share/cmake/Modules/Internal/CMakeCXXLinkerInformation.cmake"
   "/usr/share/cmake/Modules/Internal/CMakeCommonLinkerInformation.cmake"
-  "/usr/share/cmake/Modules/Linker/GNU-C.cmake"
   "/usr/share/cmake/Modules/Linker/GNU-CXX.cmake"
   "/usr/share/cmake/Modules/Linker/GNU.cmake"
   "/usr/share/cmake/Modules/Platform/Linker/GNU.cmake"
-  "/usr/share/cmake/Modules/Platform/Linker/Linux-GNU-C.cmake"
   "/usr/share/cmake/Modules/Platform/Linker/Linux-GNU-CXX.cmake"
   "/usr/share/cmake/Modules/Platform/Linker/Linux-GNU.cmake"
-  "/usr/share/cmake/Modules/Platform/Linux-GNU-C.cmake"
   "/usr/share/cmake/Modules/Platform/Linux-GNU-CXX.cmake"
   "/usr/share/cmake/Modules/Platform/Linux-GNU.cmake"
   "/usr/share/cmake/Modules/Platform/Linux-Initialize.cmake"
@@ -54,5 +47,5 @@ set(CMAKE_MAKEFILE_PRODUCTS
 
 # Dependency information for all targets:
 set(CMAKE_DEPEND_INFO_FILES
-  "CMakeFiles/deadlock_resolver.dir/DependInfo.cmake"
+  "CMakeFiles/deadlock-interceptor.dir/DependInfo.cmake"
   )

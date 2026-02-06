@@ -1,0 +1,113 @@
+#include "global_state.h"
+#include "helpers.h"
+#include "monitoring.h"
+#include "detection.h"
+#include "strategy1.h"
+#include <signal.h>
+#include <iostream>
+#include <sys/ptrace.h>
+#include <thread>
+#include <sys/wait.h>
+
+pid_t target_pid = 0;
+std::unordered_map<pid_t, ThreadInfo> thread_info_cache;
+std::mutex thread_info_mutex;
+std::atomic<bool> world_stopped{false};
+std::atomic<bool> monitoring_active{true};
+std::mutex resolution_mutex;
+std::vector<MemoryRegion> g_protected_regions;
+
+std::unordered_map<uint64_t, std::vector<std::string>> futex_waiters;
+std::unordered_map<std::string, std::unordered_map<uint64_t, Clock::time_point>> wait_start_times;
+std::unordered_map<std::string, std::unordered_set<std::string>> waits_for;
+std::unordered_map<std::string, std::unordered_set<uint64_t>> thread_locks;
+std::unordered_map<uint64_t, std::string> lock_owners;
+std::unordered_map<uint64_t, LockStats> lock_stats;
+
+std::vector<DeadlockInfo> detected_deadlocks;
+std::vector<ShadowProcess> shadow_processes;
+std::vector<DeadlockResolution> resolution_history;
+
+std::ofstream json_output;
+std::ofstream deadlock_json_output;
+std::ofstream resolution_log;
+std::ofstream shadow_log;
+size_t deadlock_counter = 0;
+std::mutex output_mutex;
+
+void signal_handler(int sig) {
+    std::cout << "\n[*] Received signal " << sig << ", cleaning up...\n";
+    
+    std::cout << "\n\033[1;36m╔══════════════════════════════════════════════════════════════════╗\033[0m\n";
+    std::cout << "\033[1;36m║                         MONITORING SUMMARY                        ║\033[0m\n";
+    std::cout << "\033[1;36m╠══════════════════════════════════════════════════════════════════╣\033[0m\n";
+    std::cout << "\033[1;33m║ Total deadlocks detected:\033[0m " << detected_deadlocks.size() << "\n";
+    
+    size_t resolved_count = 0;
+    for (const auto& deadlock : detected_deadlocks) {
+        if (deadlock.resolved) resolved_count++;
+    }
+    
+    std::cout << "\033[1;33m║ Deadlocks resolved:\033[0m " << resolved_count << "/" << detected_deadlocks.size() << "\n";
+    std::cout << "\033[1;33m║ Total threads tracked:\033[0m " << thread_info_cache.size() << "\n";
+    std::cout << "\033[1;33m║ Total locks tracked:\033[0m " << lock_stats.size() << "\n";
+    std::cout << "\033[1;33m║ Shadow processes created:\033[0m " << shadow_processes.size() << "\n";
+    std::cout << "\033[1;36m╚══════════════════════════════════════════════════════════════════╝\033[0m\n";
+    
+    exit(0);
+}
+
+int main(int argc, char **argv) {
+    if (argc != 2) {
+        std::cerr << "usage: " << argv[0] << " <pid>\n";
+        return 1;
+    }
+
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+
+    target_pid = atoi(argv[1]);
+    std::cout << "\033[1;36m[*] Deadlock Detector with Strategy 1 Resolution\033[0m\n";
+    std::cout << "\033[1;36m[*] Attaching to process " << target_pid << "\033[0m\n";
+    std::cout << "\033[1;36m[*] Strategy: Thread reconstitution in shadow process\033[0m\n";
+    
+    auto tids = list_threads(target_pid);
+    for (pid_t tid : tids) {
+        if (ptrace(PTRACE_ATTACH, tid, nullptr, nullptr) == 0) {
+            int status;
+            waitpid(tid, &status, __WALL);
+            ptrace(PTRACE_SETOPTIONS, tid, nullptr,
+                   PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL);
+            ptrace(PTRACE_SYSCALL, tid, nullptr, nullptr);
+            std::cout << "  Attached to thread " << tid << "\n";
+        }
+    }
+
+    std::cout << "\n\033[1;36m[*] Monitoring started. Detected deadlocks will be automatically resolved.\033[0m\n";
+    std::cout << "\033[1;33m[*] Press Ctrl+C to stop and see summary\033[0m\n\n";
+    
+    while (true) {
+        if (!monitoring_active.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+        
+        int status;
+        pid_t tid = waitpid(-1, &status, __WALL);
+        if (tid <= 0) continue;
+
+        if (WIFEXITED(status) || WIFSIGNALED(status)) {
+            std::cout << "\033[90m[*] " << get_thread_identifier(tid) << " exited\033[0m\n";
+            continue;
+        }
+
+        if (status >> 8 == (SIGTRAP | 0x80)) {
+            handle_syscall(tid);
+            detect_and_resolve_deadlocks();
+        }
+
+        ptrace(PTRACE_SYSCALL, tid, nullptr, nullptr);
+    }
+    
+    return 0;
+}

@@ -117,96 +117,72 @@ depend:
 .PHONY : depend
 
 #=============================================================================
-# Target rules for targets named deadlock_resolver
+# Target rules for targets named deadlock-interceptor
 
 # Build rule for target.
-deadlock_resolver: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 deadlock_resolver
-.PHONY : deadlock_resolver
+deadlock-interceptor: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 deadlock-interceptor
+.PHONY : deadlock-interceptor
 
 # fast build rule for target.
-deadlock_resolver/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock_resolver.dir/build.make CMakeFiles/deadlock_resolver.dir/build
-.PHONY : deadlock_resolver/fast
+deadlock-interceptor/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/build
+.PHONY : deadlock-interceptor/fast
 
-src/DeadlockDetector.o: src/DeadlockDetector.cpp.o
-.PHONY : src/DeadlockDetector.o
-
-# target to build an object file
-src/DeadlockDetector.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock_resolver.dir/build.make CMakeFiles/deadlock_resolver.dir/src/DeadlockDetector.cpp.o
-.PHONY : src/DeadlockDetector.cpp.o
-
-src/DeadlockDetector.i: src/DeadlockDetector.cpp.i
-.PHONY : src/DeadlockDetector.i
-
-# target to preprocess a source file
-src/DeadlockDetector.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock_resolver.dir/build.make CMakeFiles/deadlock_resolver.dir/src/DeadlockDetector.cpp.i
-.PHONY : src/DeadlockDetector.cpp.i
-
-src/DeadlockDetector.s: src/DeadlockDetector.cpp.s
-.PHONY : src/DeadlockDetector.s
-
-# target to generate assembly for a file
-src/DeadlockDetector.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock_resolver.dir/build.make CMakeFiles/deadlock_resolver.dir/src/DeadlockDetector.cpp.s
-.PHONY : src/DeadlockDetector.cpp.s
-
-src/MemoryManager.o: src/MemoryManager.cpp.o
-.PHONY : src/MemoryManager.o
+src/detection.o: src/detection.cpp.o
+.PHONY : src/detection.o
 
 # target to build an object file
-src/MemoryManager.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock_resolver.dir/build.make CMakeFiles/deadlock_resolver.dir/src/MemoryManager.cpp.o
-.PHONY : src/MemoryManager.cpp.o
+src/detection.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/detection.cpp.o
+.PHONY : src/detection.cpp.o
 
-src/MemoryManager.i: src/MemoryManager.cpp.i
-.PHONY : src/MemoryManager.i
+src/detection.i: src/detection.cpp.i
+.PHONY : src/detection.i
 
 # target to preprocess a source file
-src/MemoryManager.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock_resolver.dir/build.make CMakeFiles/deadlock_resolver.dir/src/MemoryManager.cpp.i
-.PHONY : src/MemoryManager.cpp.i
+src/detection.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/detection.cpp.i
+.PHONY : src/detection.cpp.i
 
-src/MemoryManager.s: src/MemoryManager.cpp.s
-.PHONY : src/MemoryManager.s
+src/detection.s: src/detection.cpp.s
+.PHONY : src/detection.s
 
 # target to generate assembly for a file
-src/MemoryManager.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock_resolver.dir/build.make CMakeFiles/deadlock_resolver.dir/src/MemoryManager.cpp.s
-.PHONY : src/MemoryManager.cpp.s
+src/detection.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/detection.cpp.s
+.PHONY : src/detection.cpp.s
 
-src/ThreadManager.o: src/ThreadManager.cpp.o
-.PHONY : src/ThreadManager.o
+src/helpers.o: src/helpers.cpp.o
+.PHONY : src/helpers.o
 
 # target to build an object file
-src/ThreadManager.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock_resolver.dir/build.make CMakeFiles/deadlock_resolver.dir/src/ThreadManager.cpp.o
-.PHONY : src/ThreadManager.cpp.o
+src/helpers.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/helpers.cpp.o
+.PHONY : src/helpers.cpp.o
 
-src/ThreadManager.i: src/ThreadManager.cpp.i
-.PHONY : src/ThreadManager.i
+src/helpers.i: src/helpers.cpp.i
+.PHONY : src/helpers.i
 
 # target to preprocess a source file
-src/ThreadManager.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock_resolver.dir/build.make CMakeFiles/deadlock_resolver.dir/src/ThreadManager.cpp.i
-.PHONY : src/ThreadManager.cpp.i
+src/helpers.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/helpers.cpp.i
+.PHONY : src/helpers.cpp.i
 
-src/ThreadManager.s: src/ThreadManager.cpp.s
-.PHONY : src/ThreadManager.s
+src/helpers.s: src/helpers.cpp.s
+.PHONY : src/helpers.s
 
 # target to generate assembly for a file
-src/ThreadManager.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock_resolver.dir/build.make CMakeFiles/deadlock_resolver.dir/src/ThreadManager.cpp.s
-.PHONY : src/ThreadManager.cpp.s
+src/helpers.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/helpers.cpp.s
+.PHONY : src/helpers.cpp.s
 
 src/main.o: src/main.cpp.o
 .PHONY : src/main.o
 
 # target to build an object file
 src/main.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock_resolver.dir/build.make CMakeFiles/deadlock_resolver.dir/src/main.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/main.cpp.o
 .PHONY : src/main.cpp.o
 
 src/main.i: src/main.cpp.i
@@ -214,7 +190,7 @@ src/main.i: src/main.cpp.i
 
 # target to preprocess a source file
 src/main.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock_resolver.dir/build.make CMakeFiles/deadlock_resolver.dir/src/main.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/main.cpp.i
 .PHONY : src/main.cpp.i
 
 src/main.s: src/main.cpp.s
@@ -222,8 +198,104 @@ src/main.s: src/main.cpp.s
 
 # target to generate assembly for a file
 src/main.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock_resolver.dir/build.make CMakeFiles/deadlock_resolver.dir/src/main.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/main.cpp.s
 .PHONY : src/main.cpp.s
+
+src/memory_duplication.o: src/memory_duplication.cpp.o
+.PHONY : src/memory_duplication.o
+
+# target to build an object file
+src/memory_duplication.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/memory_duplication.cpp.o
+.PHONY : src/memory_duplication.cpp.o
+
+src/memory_duplication.i: src/memory_duplication.cpp.i
+.PHONY : src/memory_duplication.i
+
+# target to preprocess a source file
+src/memory_duplication.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/memory_duplication.cpp.i
+.PHONY : src/memory_duplication.cpp.i
+
+src/memory_duplication.s: src/memory_duplication.cpp.s
+.PHONY : src/memory_duplication.s
+
+# target to generate assembly for a file
+src/memory_duplication.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/memory_duplication.cpp.s
+.PHONY : src/memory_duplication.cpp.s
+
+src/monitoring.o: src/monitoring.cpp.o
+.PHONY : src/monitoring.o
+
+# target to build an object file
+src/monitoring.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/monitoring.cpp.o
+.PHONY : src/monitoring.cpp.o
+
+src/monitoring.i: src/monitoring.cpp.i
+.PHONY : src/monitoring.i
+
+# target to preprocess a source file
+src/monitoring.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/monitoring.cpp.i
+.PHONY : src/monitoring.cpp.i
+
+src/monitoring.s: src/monitoring.cpp.s
+.PHONY : src/monitoring.s
+
+# target to generate assembly for a file
+src/monitoring.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/monitoring.cpp.s
+.PHONY : src/monitoring.cpp.s
+
+src/snapshot.o: src/snapshot.cpp.o
+.PHONY : src/snapshot.o
+
+# target to build an object file
+src/snapshot.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/snapshot.cpp.o
+.PHONY : src/snapshot.cpp.o
+
+src/snapshot.i: src/snapshot.cpp.i
+.PHONY : src/snapshot.i
+
+# target to preprocess a source file
+src/snapshot.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/snapshot.cpp.i
+.PHONY : src/snapshot.cpp.i
+
+src/snapshot.s: src/snapshot.cpp.s
+.PHONY : src/snapshot.s
+
+# target to generate assembly for a file
+src/snapshot.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/snapshot.cpp.s
+.PHONY : src/snapshot.cpp.s
+
+src/strategy1.o: src/strategy1.cpp.o
+.PHONY : src/strategy1.o
+
+# target to build an object file
+src/strategy1.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/strategy1.cpp.o
+.PHONY : src/strategy1.cpp.o
+
+src/strategy1.i: src/strategy1.cpp.i
+.PHONY : src/strategy1.i
+
+# target to preprocess a source file
+src/strategy1.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/strategy1.cpp.i
+.PHONY : src/strategy1.cpp.i
+
+src/strategy1.s: src/strategy1.cpp.s
+.PHONY : src/strategy1.s
+
+# target to generate assembly for a file
+src/strategy1.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/deadlock-interceptor.dir/build.make CMakeFiles/deadlock-interceptor.dir/src/strategy1.cpp.s
+.PHONY : src/strategy1.cpp.s
 
 # Help Target
 help:
@@ -233,19 +305,28 @@ help:
 	@echo "... depend"
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
-	@echo "... deadlock_resolver"
-	@echo "... src/DeadlockDetector.o"
-	@echo "... src/DeadlockDetector.i"
-	@echo "... src/DeadlockDetector.s"
-	@echo "... src/MemoryManager.o"
-	@echo "... src/MemoryManager.i"
-	@echo "... src/MemoryManager.s"
-	@echo "... src/ThreadManager.o"
-	@echo "... src/ThreadManager.i"
-	@echo "... src/ThreadManager.s"
+	@echo "... deadlock-interceptor"
+	@echo "... src/detection.o"
+	@echo "... src/detection.i"
+	@echo "... src/detection.s"
+	@echo "... src/helpers.o"
+	@echo "... src/helpers.i"
+	@echo "... src/helpers.s"
 	@echo "... src/main.o"
 	@echo "... src/main.i"
 	@echo "... src/main.s"
+	@echo "... src/memory_duplication.o"
+	@echo "... src/memory_duplication.i"
+	@echo "... src/memory_duplication.s"
+	@echo "... src/monitoring.o"
+	@echo "... src/monitoring.i"
+	@echo "... src/monitoring.s"
+	@echo "... src/snapshot.o"
+	@echo "... src/snapshot.i"
+	@echo "... src/snapshot.s"
+	@echo "... src/strategy1.o"
+	@echo "... src/strategy1.i"
+	@echo "... src/strategy1.s"
 .PHONY : help
 
 
