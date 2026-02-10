@@ -3,5 +3,5 @@ cd build
 cmake ..
 make
 python ../app.py &
-sudo ./deadlock-interceptor $! 1
+sudo ./deadlock-interceptor $! group
 ps -p $!
