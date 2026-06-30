@@ -25,7 +25,7 @@ void shadow_sigsegv_handler(int sig, siginfo_t* info, void* context) {
     
     if (!should_duplicate_page(page_start)) {
         std::cerr << "[SHADOW] Unhandled fault at " << fault_addr << " - aborting\n";
-        exit(1);
+        return;
     }
     
     uint8_t page_copy[page_size];
@@ -38,7 +38,7 @@ void shadow_sigsegv_handler(int sig, siginfo_t* info, void* context) {
     
     if (new_page == MAP_FAILED) {
         perror("[SHADOW] mmap MAP_FIXED failed");
-        exit(1);
+        return;
     }
     
     memcpy(new_page, page_copy, page_size);

@@ -1,5 +1,4 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/deadlock-interceptor.dir/link.d"
   "CMakeFiles/deadlock-interceptor.dir/src/detection.cpp.o"
   "CMakeFiles/deadlock-interceptor.dir/src/detection.cpp.o.d"
   "CMakeFiles/deadlock-interceptor.dir/src/helpers.cpp.o"

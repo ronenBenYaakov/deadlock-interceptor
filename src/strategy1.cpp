@@ -13,6 +13,7 @@
 #include <cstring>
 #include "memory_duplication.h"
 #include <algorithm>
+#include <sys/uio.h>
 
 ShadowProcess::ShadowProcess(ShadowProcess&& other) noexcept
     : shadow_pid(other.shadow_pid),
@@ -48,11 +49,62 @@ bool stop_the_world() {
     auto tids = list_threads(target_pid);
     std::cout << "  Target has " << tids.size() << " threads\n";
     
-    for (pid_t tid : tids) {
-        ptrace(PTRACE_DETACH, tid, nullptr, nullptr);
+    if (tids.empty()) {
+        std::cout << "  No threads to detach\n";
+        world_stopped.store(true);
+        return true;
     }
     
+    // Detach each thread with retries
+    for (pid_t tid : tids) {
+        bool detached = false;
+        
+        // Try PTRACE_DETACH with retries
+        for (int attempt = 0; attempt < 3; attempt++) {
+            if (ptrace(PTRACE_DETACH, tid, nullptr, nullptr) == 0) {
+                detached = true;
+                break;
+            }
+            
+            // If process doesn't exist, we're done
+            if (errno == ESRCH) {
+                detached = true;
+                break;
+            }
+            
+            // If not attached, we're done
+            if (errno == EPERM) {
+                detached = true;
+                break;
+            }
+            
+            // Try PTRACE_CONT as fallback before retry
+            if (attempt == 1) {
+                ptrace(PTRACE_CONT, tid, nullptr, nullptr);
+                usleep(1000);
+            }
+            
+            // Exponential backoff
+            usleep(1000 * (1 << attempt));
+        }
+        
+        // If still not detached, try emergency methods
+        if (!detached) {
+            // Try PTRACE_CONT
+            ptrace(PTRACE_CONT, tid, nullptr, nullptr);
+            usleep(1000);
+            
+            // Final attempt at PTRACE_DETACH
+            if (ptrace(PTRACE_DETACH, tid, nullptr, nullptr) != 0) {
+                // Last resort: send SIGCONT and hope
+                kill(tid, SIGCONT);
+            }
+        }
+    }
+    
+    // Ensure process is running
     usleep(50000);
+    kill(target_pid, SIGCONT);
     
     world_stopped.store(true);
     std::cout << "\033[1;32m[✓] Detached from all threads, ready for fork\033[0m\n";
@@ -292,7 +344,7 @@ void monitor_shadow_process(pid_t shadow_pid, pid_t victim_tid, const DeadlockIn
                       << " killed by signal " << WTERMSIG(status) << "\033[0m\n";
         }
         
-        exit(0);
+        return;
     } else if (monitor > 0) {
         std::cout << "  ✓ Monitor process " << monitor << " started\n";
         
@@ -306,6 +358,59 @@ void monitor_shadow_process(pid_t shadow_pid, pid_t victim_tid, const DeadlockIn
         std::cout << "\033[1;32m[✓] Deadlock #" << deadlock.deadlock_id 
                   << " resolved via shadow process " << shadow_pid << "\033[0m\n";
     }
+}
+
+bool unlock_futex_safely(uint64_t lock_addr) {
+    size_t page_size = sysconf(_SC_PAGESIZE);
+    
+    // Calculate page-aligned address
+    uintptr_t page_start = lock_addr & ~(page_size - 1);
+    uintptr_t page_end = page_start + page_size;
+    
+    // Check if the address is within a valid memory region
+    if (lock_addr < page_start || lock_addr >= page_end) {
+        printf("  Invalid address %s\n", to_hex_string(lock_addr).c_str());
+        return false;
+    }
+    
+    // First try to change permissions
+    if (mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE) != 0) {
+        perror("  mprotect failed");
+        
+        // Try alternative: use /proc/self/mem to write directly
+        char mem_path[256];
+        snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", target_pid);
+        
+        int mem_fd = open(mem_path, O_RDWR);
+        if (mem_fd >= 0) {
+            // Seek to the lock address
+            if (lseek(mem_fd, lock_addr, SEEK_SET) != (off_t)lock_addr) {
+                close(mem_fd);
+                return false;
+            }
+            
+            // Write 0 to unlock
+            uint32_t zero = 0;
+            ssize_t written = write(mem_fd, &zero, sizeof(zero));
+            close(mem_fd);
+            
+            if (written == sizeof(zero)) {
+                printf("  Unlocked %s via /proc/mem\n", to_hex_string(lock_addr).c_str());
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    // Direct memory write
+    volatile uint32_t* futex = (volatile uint32_t*)lock_addr;
+    *futex = 0;
+    printf("  Unlocked %s\n", to_hex_string(lock_addr).c_str());
+    
+    // Restore permissions
+    mprotect((void*)page_start, page_size, PROT_READ);
+    
+    return true;
 }
 
 bool resolve_deadlock_strategy1(const DeadlockInfo& deadlock) {
@@ -333,16 +438,46 @@ bool resolve_deadlock_strategy1(const DeadlockInfo& deadlock) {
     
     printf("  Selected victim: %s\n", victim_name.c_str());
     
-    // Snapshot (optional)
-    ThreadSnapshot victim_snap = snapshot_thread_state(victim_tid);
-    
-    // Detach from all threads
+    // Detach from all threads with safety
     auto tids = list_threads(target_pid);
+    printf("  Detaching from %zu threads\n", tids.size());
+    
     for (pid_t tid : tids) {
-        ptrace(PTRACE_DETACH, tid, nullptr, nullptr);
+        bool detached = false;
+        
+        // Try PTRACE_DETACH with retries
+        for (int attempt = 0; attempt < 3; attempt++) {
+            if (ptrace(PTRACE_DETACH, tid, nullptr, nullptr) == 0) {
+                detached = true;
+                break;
+            }
+            
+            if (errno == ESRCH || errno == EPERM) {
+                detached = true;
+                break;
+            }
+            
+            // Try PTRACE_CONT as fallback
+            if (attempt == 1) {
+                ptrace(PTRACE_CONT, tid, nullptr, nullptr);
+                usleep(1000);
+            }
+            
+            usleep(1000 * (1 << attempt));
+        }
+        
+        // Emergency detach if still attached
+        if (!detached) {
+            ptrace(PTRACE_CONT, tid, nullptr, nullptr);
+            usleep(1000);
+            ptrace(PTRACE_DETACH, tid, nullptr, nullptr);
+            kill(tid, SIGCONT);
+        }
     }
     
-    usleep(100000);  // 100ms
+    // Ensure victim is running before fork
+    kill(victim_tid, SIGCONT);
+    usleep(50000);
     
     // Fork shadow
     pid_t shadow = fork();
@@ -352,14 +487,24 @@ bool resolve_deadlock_strategy1(const DeadlockInfo& deadlock) {
         printf("\033[1;36m[SHADOW] PID=%d\033[0m\n", getpid());
         
         // Unlock futexes
-        for (uint64_t lock_addr : deadlock.involved_locks) {
-            size_t page_size = sysconf(_SC_PAGESIZE);
-            uintptr_t page_start = lock_addr & ~(page_size - 1);
+        for (uint64_t lock_addr : deadlock.involved_locks) {            
+            uint32_t zero = 0;
+            struct iovec local_iov = {
+                .iov_base = &zero,
+                .iov_len = sizeof(uint32_t)
+            };
+            struct iovec remote_iov = {
+                .iov_base = (void*)lock_addr,
+                .iov_len = sizeof(uint32_t)
+            };
             
-            if (mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE) == 0) {
-                volatile uint32_t* futex = (volatile uint32_t*)lock_addr;
-                *futex = 0;
-                printf("  Unlocked %s\n", to_hex_string(lock_addr).c_str());
+            ssize_t nwritten = process_vm_writev(target_pid, &local_iov, 1, &remote_iov, 1, 0);
+            
+            if (nwritten == sizeof(uint32_t)) {
+                printf("  ✓ Unlocked %s\n", to_hex_string(lock_addr).c_str());
+            } else {
+                printf("  ✗ Failed to unlock %s (errno: %d)\n", 
+                    to_hex_string(lock_addr).c_str(), errno);
             }
         }
         
@@ -368,41 +513,75 @@ bool resolve_deadlock_strategy1(const DeadlockInfo& deadlock) {
             kill(victim_tid, SIGCONT);
         }
         
-        // Quick exit
-        _exit(0);
+        // Resume all threads (just in case)
+        for (pid_t tid : tids) {
+            if (thread_exists(tid)) {
+                kill(tid, SIGCONT);
+            }
+        }
+        
+        return true;
         
     } else if (shadow > 0) {
         // PARENT PROCESS
         printf("  Shadow PID: %d\n", shadow);
-
+        
         // Wait for shadow process to finish
         int status;
-        waitpid(shadow, &status, 0);
-
-        // --- Add this line ---
-        resume_paused_threads(victim_tid);
-        // --- Resume paused threads safely ---
-
+        pid_t result = waitpid(shadow, &status, 0);
+        
+        if (result == -1) {
+            perror("waitpid failed");
+            monitoring_active.store(true);
+            return false;
+        }
+        
+        // Resume all paused threads safely
+        printf("  Resuming all threads...\n");
+        for (pid_t tid : tids) {
+            if (thread_exists(tid)) {
+                // Send SIGCONT to ensure threads are running
+                if (kill(tid, SIGCONT) == -1) {
+                    if (errno != ESRCH) {
+                        printf("  Warning: Could not resume thread %d\n", tid);
+                    }
+                }
+            }
+        }
+        
+        // Ensure victim is running
+        if (thread_exists(victim_tid)) {
+            kill(victim_tid, SIGCONT);
+        }
+        
+        // Wait a bit for threads to stabilize
+        usleep(100000);
+        
         // Clean data structures
+        printf("  Cleaning data structures...\n");
         waits_for.erase(victim_name);
         thread_locks.erase(victim_name);
-
+        
         for (uint64_t lock_addr : deadlock.involved_locks) {
             auto it = lock_owners.find(lock_addr);
             if (it != lock_owners.end() && it->second == victim_name) {
                 lock_owners.erase(it);
             }
         }
-
+        
         for (auto& [lock_addr, waiters] : futex_waiters) {
             waiters.erase(std::remove(waiters.begin(), waiters.end(), victim_name), waiters.end());
         }
-
+        
         printf("\033[1;32m[✓] Deadlock resolved! Program continues without tracing.\033[0m\n");
-
-        // Exit cleanly
         printf("[*] Agent exiting after successful resolution\n");
-        exit(0);
+        
+        // Final cleanup
+        fflush(stdout);
+        fflush(stderr);
+        
+        return true;
+        
     } else {
         perror("fork failed");
         monitoring_active.store(true);

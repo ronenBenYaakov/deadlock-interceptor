@@ -1041,7 +1041,7 @@ bool resolve_group_deadlock(const GroupDeadlockInfo& group_deadlock) {
             if (access(proc_path, F_OK) != 0) {
                 // Target died, we can exit
                 unlink("/tmp/deadlock_guardian.pid");
-                _exit(0);
+                return true;
             }
             
             // Send periodic SIGCONT
@@ -1084,9 +1084,6 @@ bool resolve_group_deadlock(const GroupDeadlockInfo& group_deadlock) {
     
     std::cout << "\n\033[1;32m[*] Deadlock resolution SUCCESSFUL!\033[0m\n";
     std::cout << "[*] Monitor exiting. Target process continues with guardian.\n";
-    
-    // The guardian will keep the process alive even if shell tries to kill it
-    _exit(0);
-    
+        
     return true;
 }

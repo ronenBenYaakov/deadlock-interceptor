@@ -77,7 +77,7 @@ void signal_handler(int sig) {
     
     std::cout << "\033[1;36m╚══════════════════════════════════════════════════════════════════╝\033[0m\n";
     
-    exit(0);
+    return;
 }
 
 int main(int argc, char **argv) {
