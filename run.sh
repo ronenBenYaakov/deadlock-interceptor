@@ -3,7 +3,7 @@ cd build
 cmake ..
 make
 
-python ../app.py &
+setsid python ../app.py &
 PID=$!
 
 echo "[*] Started Python PID: $PID"
