@@ -1,3 +1,0 @@
-/home/ronen/deadlock-interceptor/build/CMakeFiles/deadlock-interceptor.dir
-/home/ronen/deadlock-interceptor/build/CMakeFiles/edit_cache.dir
-/home/ronen/deadlock-interceptor/build/CMakeFiles/rebuild_cache.dir
