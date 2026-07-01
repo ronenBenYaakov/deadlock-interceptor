@@ -815,19 +815,22 @@ bool resolve_deadlock_strategy1(const DeadlockInfo& deadlock) {
     printf("  Detaching from all threads...\n");
     int detached_count = 0;
     
+    // In resolve_deadlock_strategy1, when detaching:
     for (pid_t tid : tids) {
         if (!thread_exists(tid)) {
             detached_count++;
             continue;
         }
         
-        errno = 0;
+        // CRITICAL: Always pass SIGCONT with detach
         if (ptrace(PTRACE_DETACH, tid, nullptr, (void*)(intptr_t)SIGCONT) == 0) {
             detached_count++;
         } else if (errno == ESRCH || errno == EPERM) {
             detached_count++;
         } else {
-            ptrace(PTRACE_CONT, tid, nullptr, nullptr);
+            // Emergency: force SIGCONT
+            kill(tid, SIGCONT);
+            ptrace(PTRACE_DETACH, tid, nullptr, nullptr);
             kill(tid, SIGCONT);
         }
     }

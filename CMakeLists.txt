@@ -16,6 +16,7 @@ add_executable(deadlock-interceptor
     src/monitoring.cpp
     src/snapshot.cpp
     src/strategy1.cpp
+    src/global_state.cpp
 )
 
 # Public headers
