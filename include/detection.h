@@ -1,6 +1,7 @@
 #ifndef DETECTION_H
 #define DETECTION_H
 
+#pragma once
 #include "deadlock_resolver.h"
 #include <string>
 #include <vector>

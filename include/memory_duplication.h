@@ -1,6 +1,7 @@
 #ifndef MEMORY_DUPLICATION_H
 #define MEMORY_DUPLICATION_H
 
+#pragma once
 #include "deadlock_resolver.h"
 #include <cstdint>
 #include <vector>

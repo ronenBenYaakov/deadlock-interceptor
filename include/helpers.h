@@ -1,8 +1,10 @@
 #ifndef HELPERS_H
 #define HELPERS_H
 
+#pragma once
 #include <string>
 #include <vector>
+#include <cstring>
 #include <cstdint>
 #include <sys/types.h>
 
@@ -23,5 +25,7 @@ bool write_process_memory(pid_t pid, void* addr, const void* buffer, size_t size
 std::vector<MemoryRegion> read_process_maps(pid_t pid);
 std::vector<pid_t> list_threads(pid_t pid);
 pid_t extract_tid_from_identifier(const std::string& identifier);
+int get_tracer_pid(pid_t tid);
+bool is_thread_stopped(pid_t tid);
 
 #endif

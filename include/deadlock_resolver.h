@@ -1,6 +1,6 @@
 #ifndef DEADLOCK_RESOLVER_H
 #define DEADLOCK_RESOLVER_H
-
+#pragma once
 #include <sys/types.h>
 #include <sys/user.h>
 #include <chrono>

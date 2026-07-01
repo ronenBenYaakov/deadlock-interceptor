@@ -1,5 +1,6 @@
 #ifndef STRATEGY1_H
 #define STRATEGY1_H
+#pragma once
 
 #include "deadlock_resolver.h"
 #include <vector>

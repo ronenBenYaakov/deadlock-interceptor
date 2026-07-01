@@ -1,6 +1,7 @@
 #ifndef MONITORING_H
 #define MONITORING_H
 
+#pragma once
 #include <sys/types.h>
 #include <cstdint>
 #include <string>

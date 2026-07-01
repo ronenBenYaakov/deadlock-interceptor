@@ -101,10 +101,31 @@ bool read_process_memory(pid_t pid, void* addr, void* buffer, size_t size) {
     return true;
 }
 
+// helpers.h
+// helpers.cpp
+int get_tracer_pid(pid_t tid) {
+    char path[256];
+    snprintf(path, sizeof(path), "/proc/%d/status", tid);
+    FILE* fp = fopen(path, "r");
+    if (!fp) return -1;
+    
+    char line[256];
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, "TracerPid:", 10) == 0) {
+            int tracer = atoi(line + 10);
+            fclose(fp);
+            return tracer;
+        }
+    }
+    
+    fclose(fp);
+    return -1;
+}
+
 bool thread_exists(pid_t tid) {
     char path[256];
-    snprintf(path, sizeof(path), "/proc/%d/task/%d", target_pid, tid);
-    return access(path, F_OK) == 0;
+    snprintf(path, sizeof(path), "/proc/%d/status", tid);
+    return (access(path, F_OK) == 0);
 }
 
 bool write_process_memory(pid_t pid, void* addr, const void* buffer, size_t size) {
@@ -162,6 +183,27 @@ std::vector<MemoryRegion> read_process_maps(pid_t pid) {
     
     fclose(maps_file);
     return regions;
+}
+
+
+// Check if thread is in STOP state
+bool is_thread_stopped(pid_t tid) {
+    char path[256];
+    snprintf(path, sizeof(path), "/proc/%d/status", tid);
+    FILE* fp = fopen(path, "r");
+    if (!fp) return false;
+    
+    char line[256];
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, "State:", 6) == 0) {
+            bool stopped = (strchr(line, 'T') != nullptr);
+            fclose(fp);
+            return stopped;
+        }
+    }
+    
+    fclose(fp);
+    return false;
 }
 
 std::vector<pid_t> list_threads(pid_t pid) {

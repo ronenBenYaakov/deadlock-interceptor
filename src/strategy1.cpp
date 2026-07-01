@@ -14,6 +14,7 @@
 #include "memory_duplication.h"
 #include <algorithm>
 #include <sys/uio.h>
+#include "futex_unlocker.h"
 
 ShadowProcess::ShadowProcess(ShadowProcess&& other) noexcept
     : shadow_pid(other.shadow_pid),
@@ -413,10 +414,378 @@ bool unlock_futex_safely(uint64_t lock_addr) {
     return true;
 }
 
-bool resolve_deadlock_strategy1(const DeadlockInfo& deadlock) {
-    printf("\n\033[1;35m[RESOLUTION] Breaking deadlock...\033[0m\n");
+static void cleanup_stuck_threads(const std::vector<pid_t>& tids) {
+    printf("  Cleaning up stuck threads...\n");
     
+    int cleaned_count = 0;
+    int failed_count = 0;
+    
+    for (pid_t tid : tids) {
+        if (!thread_exists(tid)) {
+            printf("    Thread %d no longer exists\n", tid);
+            continue;
+        }
+        
+        printf("    Checking thread %d...\n", tid);
+        
+        // 1. Check thread state via /proc
+        char path[256];
+        snprintf(path, sizeof(path), "/proc/%d/status", tid);
+        FILE* fp = fopen(path, "r");
+        if (!fp) {
+            printf("    Failed to open /proc/%d/status: %s\n", tid, strerror(errno));
+            continue;
+        }
+        
+        char line[256];
+        bool stopped = false;
+        bool zombie = false;
+        bool running = false;
+        int tracer_pid = 0;
+        
+        while (fgets(line, sizeof(line), fp)) {
+            if (strncmp(line, "State:", 6) == 0) {
+                if (strchr(line, 'T') != nullptr) {
+                    stopped = true;
+                } else if (strchr(line, 'Z') != nullptr) {
+                    zombie = true;
+                } else if (strchr(line, 'R') != nullptr || strchr(line, 'S') != nullptr) {
+                    running = true;
+                }
+            }
+            if (strncmp(line, "TracerPid:", 10) == 0) {
+                tracer_pid = atoi(line + 10);
+            }
+        }
+        fclose(fp);
+        
+        if (zombie) {
+            printf("    Thread %d is zombie, skipping\n", tid);
+            continue;
+        }
+        
+        // 2. If thread is stopped, try to continue it
+        if (stopped) {
+            printf("    Thread %d is stopped (T state), sending SIGCONT...\n", tid);
+            
+            // Send SIGCONT to resume
+            if (kill(tid, SIGCONT) == 0) {
+                printf("    ✓ Sent SIGCONT to thread %d\n", tid);
+                cleaned_count++;
+            } else {
+                printf("    Failed to send SIGCONT to thread %d: %s\n", 
+                       tid, strerror(errno));
+            }
+            
+            // Wait a bit for the thread to respond
+            usleep(10000);
+        }
+        
+        // 3. If thread is traced by another process, try to detach
+        if (tracer_pid > 0 && tracer_pid != getpid()) {
+            printf("    Thread %d is traced by PID %d, attempting to detach...\n", 
+                   tid, tracer_pid);
+            
+            if (ptrace(PTRACE_DETACH, tid, nullptr, nullptr) == 0) {
+                printf("    ✓ Detached thread %d from tracer %d\n", tid, tracer_pid);
+                cleaned_count++;
+            } else {
+                printf("    Failed to detach thread %d: %s\n", tid, strerror(errno));
+                
+                // Try to force detach with SIGCONT
+                kill(tid, SIGCONT);
+                usleep(10000);
+                if (ptrace(PTRACE_DETACH, tid, nullptr, nullptr) == 0) {
+                    printf("    ✓ Force detached thread %d\n", tid);
+                    cleaned_count++;
+                }
+            }
+        }
+        
+        // 4. If thread is stuck in ptrace, try to continue it
+        if (tracer_pid == getpid()) {
+            printf("    Thread %d is traced by us, attempting to continue...\n", tid);
+            
+            // Try PTRACE_CONT
+            if (ptrace(PTRACE_CONT, tid, nullptr, nullptr) == 0) {
+                printf("    ✓ Continued thread %d\n", tid);
+                cleaned_count++;
+            } else {
+                // Try PTRACE_SYSCALL as alternative
+                if (ptrace(PTRACE_SYSCALL, tid, nullptr, nullptr) == 0) {
+                    printf("    ✓ Resumed syscall tracing on thread %d\n", tid);
+                    cleaned_count++;
+                } else {
+                    // Try detach and re-attach
+                    printf("    Attempting to detach and re-attach thread %d...\n", tid);
+                    
+                    if (ptrace(PTRACE_DETACH, tid, nullptr, nullptr) == 0) {
+                        usleep(10000);
+                        
+                        // Re-attach
+                        if (ptrace(PTRACE_ATTACH, tid, nullptr, nullptr) == 0) {
+                            int status;
+                            waitpid(tid, &status, 0);
+                            
+                            if (ptrace(PTRACE_SETOPTIONS, tid, nullptr,
+                                      PTRACE_O_TRACESYSGOOD) == 0) {
+                                if (ptrace(PTRACE_SYSCALL, tid, nullptr, nullptr) == 0) {
+                                    printf("    ✓ Re-attached and resumed thread %d\n", tid);
+                                    cleaned_count++;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 5. Last resort: Send SIGKILL? 
+        // Usually not needed, but sometimes useful for completely hung threads
+        // Uncomment if necessary
+        /*
+        if (!running && !zombie && !stopped) {
+            printf("    Thread %d is unresponsive, sending SIGKILL...\n", tid);
+            if (kill(tid, SIGKILL) == 0) {
+                printf("    ✓ Killed unresponsive thread %d\n", tid);
+                cleaned_count++;
+            }
+        }
+        */
+        
+        // 6. Verify thread is now responsive
+        char check_path[256];
+        snprintf(check_path, sizeof(check_path), "/proc/%d/status", tid);
+        FILE* check_fp = fopen(check_path, "r");
+        if (check_fp) {
+            bool is_alive = false;
+            while (fgets(line, sizeof(line), check_fp)) {
+                if (strncmp(line, "State:", 6) == 0) {
+                    if (strchr(line, 'R') != nullptr || 
+                        strchr(line, 'S') != nullptr ||
+                        strchr(line, 'T') != nullptr) {
+                        is_alive = true;
+                    }
+                    break;
+                }
+            }
+            fclose(check_fp);
+            
+            if (!is_alive) {
+                printf("    Thread %d still unresponsive after cleanup\n", tid);
+                failed_count++;
+            }
+        }
+    }
+    
+    printf("  Cleanup complete: %d threads cleaned, %d failed\n", 
+           cleaned_count, failed_count);
+}
+
+/**
+ * Re-attach to a thread and resume syscall tracing
+ * 
+ * This function handles the complex task of re-attaching to a thread after
+ * it has been detached during deadlock resolution. It handles various edge
+ * cases including:
+ * - Thread already traced by us
+ * - Thread traced by another process
+ * - Thread in STOP state
+ * - Thread that doesn't exist anymore
+ * - Permission denied (EPERM) errors
+ * 
+ * @param tid Thread ID to re-attach to
+ * @param max_retries Maximum number of retry attempts (default: 5)
+ * @return true if successfully re-attached and resumed, false otherwise
+ */
+static bool reattach_and_resume_tracing(pid_t tid, int max_retries = 5) {
+    // 1. Check if thread exists
+    if (!thread_exists(tid)) {
+        printf("    Thread %d no longer exists\n", tid);
+        return false;
+    }
+    
+    // 2. Check current tracer and state
+    int tracer_pid = get_tracer_pid(tid);
+    bool stopped = is_thread_stopped(tid);
+    
+    // 3. If already traced by us, try to resume directly
+    if (tracer_pid == getpid()) {
+        printf("    Thread %d already traced by us\n", tid);
+        
+        // Try PTRACE_SYSCALL first (preferred for syscall tracing)
+        if (ptrace(PTRACE_SYSCALL, tid, nullptr, nullptr) == 0) {
+            printf("    ✓ Resumed tracing on already-attached thread %d\n", tid);
+            return true;
+        }
+        
+        // If PTRACE_SYSCALL fails, try PTRACE_CONT (less tracing)
+        if (ptrace(PTRACE_CONT, tid, nullptr, nullptr) == 0) {
+            printf("    ✓ Continued thread %d (no syscall tracing)\n", tid);
+            return true;
+        }
+        
+        // If both fail, the thread is in a bad state - detach and re-attach
+        printf("    Failed to resume, attempting detach and re-attach...\n");
+        ptrace(PTRACE_DETACH, tid, nullptr, nullptr);
+        usleep(10000); // 10ms wait
+        // Fall through to re-attach
+    } 
+    // 4. If traced by another process, try to detach first
+    else if (tracer_pid > 0) {
+        printf("    Thread %d traced by PID %d, detaching...\n", tid, tracer_pid);
+        if (ptrace(PTRACE_DETACH, tid, nullptr, nullptr) == 0) {
+            printf("    ✓ Detached from other tracer\n");
+            usleep(10000);
+            // Fall through to re-attach
+        } else {
+            printf("    Failed to detach from other tracer: %s\n", strerror(errno));
+            // Try to force with SIGCONT
+            kill(tid, SIGCONT);
+            usleep(10000);
+            // Fall through anyway
+        }
+    }
+    
+    // 5. If stopped and not traced, send SIGCONT to wake it up
+    if (stopped && tracer_pid == 0) {
+        printf("    Thread %d is stopped, sending SIGCONT...\n", tid);
+        if (kill(tid, SIGCONT) == 0) {
+            printf("    ✓ Sent SIGCONT to thread %d\n", tid);
+            usleep(10000);
+        } else {
+            printf("    Failed to send SIGCONT: %s\n", strerror(errno));
+        }
+    }
+    
+    // 6. Attempt to re-attach with retries
+    for (int attempt = 0; attempt < max_retries; attempt++) {
+        errno = 0;
+        printf("    Re-attach attempt %d/%d for thread %d...\n", attempt + 1, max_retries, tid);
+        
+        // Try to attach
+        if (ptrace(PTRACE_ATTACH, tid, nullptr, nullptr) == 0) {
+            printf("    ✓ Attached to thread %d\n", tid);
+            
+            // Wait for the thread to stop
+            int status;
+            pid_t waited = waitpid(tid, &status, WNOHANG);
+            
+            if (waited == 0) {
+                // Thread didn't stop immediately, wait a bit
+                struct timespec ts = {0, 50000000}; // 50ms
+                nanosleep(&ts, nullptr);
+                waited = waitpid(tid, &status, 0); // Blocking wait
+            }
+            
+            if (waited == tid) {
+                printf("    ✓ Thread %d stopped for re-attach\n", tid);
+                
+                // Set options for syscall tracing
+                if (ptrace(PTRACE_SETOPTIONS, tid, nullptr,
+                          PTRACE_O_TRACESYSGOOD) == 0) {
+                    printf("    ✓ Set tracing options\n");
+                    
+                    // Resume with PTRACE_SYSCALL
+                    if (ptrace(PTRACE_SYSCALL, tid, nullptr, nullptr) == 0) {
+                        printf("    ✓ Re-attached and resumed tracing on thread %d\n", tid);
+                        return true;
+                    } else {
+                        printf("    PTRACE_SYSCALL failed: %s\n", strerror(errno));
+                    }
+                } else {
+                    printf("    PTRACE_SETOPTIONS failed: %s\n", strerror(errno));
+                }
+                
+                // If we got here, something failed - try to detach
+                ptrace(PTRACE_DETACH, tid, nullptr, nullptr);
+                usleep(10000);
+            } else {
+                printf("    waitpid failed or returned wrong PID: %s\n", strerror(errno));
+                // Try to detach
+                ptrace(PTRACE_DETACH, tid, nullptr, nullptr);
+                usleep(10000);
+            }
+        } else if (errno == EPERM) {
+            // Permission denied - this can happen if already attached
+            printf("    Permission denied for thread %d (attempt %d/%d)\n", 
+                   tid, attempt + 1, max_retries);
+            
+            // Check if it's attached to us now
+            int new_tracer = get_tracer_pid(tid);
+            if (new_tracer == getpid()) {
+                printf("    Thread %d is now traced by us, trying to resume...\n", tid);
+                if (ptrace(PTRACE_SYSCALL, tid, nullptr, nullptr) == 0) {
+                    printf("    ✓ Resumed thread %d\n", tid);
+                    return true;
+                }
+            }
+            
+            // Try to force resume with SIGCONT
+            if (kill(tid, SIGCONT) == 0) {
+                printf("    Sent SIGCONT to thread %d\n", tid);
+                usleep(10000);
+                
+                // Try PTRACE_SYSCALL one more time
+                if (ptrace(PTRACE_SYSCALL, tid, nullptr, nullptr) == 0) {
+                    printf("    ✓ Resumed thread %d after SIGCONT\n", tid);
+                    return true;
+                }
+            }
+            
+            // Try to detach and re-attach
+            ptrace(PTRACE_DETACH, tid, nullptr, nullptr);
+            usleep(10000);
+            // Continue to next retry
+        } else if (errno == ESRCH) {
+            // Thread died
+            printf("    Thread %d died during re-attach\n", tid);
+            return false;
+        } else {
+            printf("    PTRACE_ATTACH failed: %s (errno=%d)\n", strerror(errno), errno);
+        }
+        
+        // Wait before retry with exponential backoff
+        if (attempt < max_retries - 1) {
+            int delay = 50000 * (attempt + 1); // 50ms, 100ms, 150ms, etc.
+            printf("    Waiting %dms before retry...\n", delay/1000);
+            usleep(delay);
+        }
+    }
+    
+    // 7. Last resort: try to just continue the thread without ptrace
+    printf("    Last resort for thread %d...\n", tid);
+    
+    // Try PTRACE_CONT
+    if (ptrace(PTRACE_CONT, tid, nullptr, nullptr) == 0) {
+        printf("    ✓ Continued thread %d (no ptrace re-attach)\n", tid);
+        return true;
+    }
+    
+    // Try SIGCONT
+    if (kill(tid, SIGCONT) == 0) {
+        printf("    ✓ Sent SIGCONT to thread %d (no ptrace)\n", tid);
+        return true;
+    }
+    
+    // Try to detach if still attached
+    if (ptrace(PTRACE_DETACH, tid, nullptr, nullptr) == 0) {
+        printf("    Detached thread %d\n", tid);
+        // Send SIGCONT to make it run
+        kill(tid, SIGCONT);
+        return true;
+    }
+    
+    printf("    ✗ Failed to re-attach to thread %d after %d attempts\n", 
+           tid, max_retries);
+    return false;
+}
+
+bool resolve_deadlock_strategy1(const DeadlockInfo& deadlock) {
+    // CRITICAL: Set resolution flag BEFORE doing anything
     monitoring_active.store(false);
+    
+    printf("\n\033[1;35m[RESOLUTION] Breaking deadlock...\033[0m\n");
     
     // Find victim
     pid_t victim_tid = 0;
@@ -436,91 +805,69 @@ bool resolve_deadlock_strategy1(const DeadlockInfo& deadlock) {
         return false;
     }
     
-    printf("  Selected victim: %s\n", victim_name.c_str());
+    printf("  Selected victim: %s (TID=%d)\n", victim_name.c_str(), victim_tid);
+    
+    // Get all threads and save their state
+    auto tids = list_threads(target_pid);
+    printf("  Found %zu threads in process\n", tids.size());
     
     // Detach from all threads with safety
-    auto tids = list_threads(target_pid);
-    printf("  Detaching from %zu threads\n", tids.size());
+    printf("  Detaching from all threads...\n");
+    int detached_count = 0;
     
     for (pid_t tid : tids) {
-        bool detached = false;
-        
-        // Try PTRACE_DETACH with retries
-        for (int attempt = 0; attempt < 3; attempt++) {
-            if (ptrace(PTRACE_DETACH, tid, nullptr, nullptr) == 0) {
-                detached = true;
-                break;
-            }
-            
-            if (errno == ESRCH || errno == EPERM) {
-                detached = true;
-                break;
-            }
-            
-            // Try PTRACE_CONT as fallback
-            if (attempt == 1) {
-                ptrace(PTRACE_CONT, tid, nullptr, nullptr);
-                usleep(1000);
-            }
-            
-            usleep(1000 * (1 << attempt));
+        if (!thread_exists(tid)) {
+            detached_count++;
+            continue;
         }
         
-        // Emergency detach if still attached
-        if (!detached) {
+        errno = 0;
+        if (ptrace(PTRACE_DETACH, tid, nullptr, (void*)(intptr_t)SIGCONT) == 0) {
+            detached_count++;
+        } else if (errno == ESRCH || errno == EPERM) {
+            detached_count++;
+        } else {
             ptrace(PTRACE_CONT, tid, nullptr, nullptr);
-            usleep(1000);
-            ptrace(PTRACE_DETACH, tid, nullptr, nullptr);
             kill(tid, SIGCONT);
         }
     }
+    printf("  Detached from %d/%zu threads\n", detached_count, tids.size());
     
     // Ensure victim is running before fork
     kill(victim_tid, SIGCONT);
     usleep(50000);
     
-    // Fork shadow
+    // Fork shadow process
     pid_t shadow = fork();
     
     if (shadow == 0) {
-        // SHADOW PROCESS
+        // SHADOW PROCESS - NO ptrace operations here!
         printf("\033[1;36m[SHADOW] PID=%d\033[0m\n", getpid());
         
-        // Unlock futexes
-        for (uint64_t lock_addr : deadlock.involved_locks) {            
-            uint32_t zero = 0;
-            struct iovec local_iov = {
-                .iov_base = &zero,
-                .iov_len = sizeof(uint32_t)
-            };
-            struct iovec remote_iov = {
-                .iov_base = (void*)lock_addr,
-                .iov_len = sizeof(uint32_t)
-            };
-            
-            ssize_t nwritten = process_vm_writev(target_pid, &local_iov, 1, &remote_iov, 1, 0);
-            
-            if (nwritten == sizeof(uint32_t)) {
-                printf("  ✓ Unlocked %s\n", to_hex_string(lock_addr).c_str());
-            } else {
-                printf("  ✗ Failed to unlock %s (errno: %d)\n", 
-                    to_hex_string(lock_addr).c_str(), errno);
-            }
-        }
+        // Use FutexUnlocker - this uses cross-process methods only
+        FutexUnlocker unlocker(target_pid);
+        unlocker.set_verbose(true);
         
-        // Resume victim
-        if (thread_exists(victim_tid)) {
-            kill(victim_tid, SIGCONT);
-        }
+        int unlocked = unlocker.unlock_multiple(deadlock.involved_locks, 7);
+        printf("  Unlocked %d/%zu locks in shadow process\n", 
+               unlocked, deadlock.involved_locks.size());
         
-        // Resume all threads (just in case)
+        // Resume all threads
+        printf("  Resuming all threads...\n");
         for (pid_t tid : tids) {
             if (thread_exists(tid)) {
                 kill(tid, SIGCONT);
             }
         }
         
-        return true;
+        // Wake up any futex waiters
+        for (uint64_t lock_addr : deadlock.involved_locks) {
+            syscall(SYS_futex, (void*)lock_addr, FUTEX_WAKE, INT_MAX, NULL, NULL, 0);
+        }
+        
+        fflush(stdout);
+        fflush(stderr);
+        _exit(0);
         
     } else if (shadow > 0) {
         // PARENT PROCESS
@@ -536,14 +883,23 @@ bool resolve_deadlock_strategy1(const DeadlockInfo& deadlock) {
             return false;
         }
         
+        if (WIFEXITED(status)) {
+            printf("  Shadow process exited with code %d\n", WEXITSTATUS(status));
+        } else if (WIFSIGNALED(status)) {
+            printf("  Shadow process killed by signal %d\n", WTERMSIG(status));
+        }
+        
+        // Clean up any stuck threads
+        cleanup_stuck_threads(tids);
+        
         // Resume all paused threads safely
         printf("  Resuming all threads...\n");
         for (pid_t tid : tids) {
             if (thread_exists(tid)) {
-                // Send SIGCONT to ensure threads are running
                 if (kill(tid, SIGCONT) == -1) {
                     if (errno != ESRCH) {
-                        printf("  Warning: Could not resume thread %d\n", tid);
+                        printf("  Warning: Could not resume thread %d: %s\n", 
+                               tid, strerror(errno));
                     }
                 }
             }
@@ -554,10 +910,50 @@ bool resolve_deadlock_strategy1(const DeadlockInfo& deadlock) {
             kill(victim_tid, SIGCONT);
         }
         
-        // Wait a bit for threads to stabilize
+        // Wait for threads to stabilize
         usleep(100000);
         
+        // ==========================================
+        // CRITICAL: Re-attach for continued monitoring
+        // ==========================================
+        printf("  Re-attaching for continued monitoring...\n");
+        int reattached_count = 0;
+        
+        for (pid_t tid : tids) {
+            if (!thread_exists(tid)) {
+                printf("    Thread %d no longer exists, skipping\n", tid);
+                continue;
+            }
+            
+            // Skip victim - handle separately
+            if (tid == victim_tid) {
+                printf("    Will re-attach victim thread %d separately\n", tid);
+                continue;
+            }
+            
+            // Try to re-attach
+            if (reattach_and_resume_tracing(tid)) {
+                reattached_count++;
+            }
+        }
+        
+        // Try to re-attach victim
+        if (thread_exists(victim_tid)) {
+            printf("  Attempting to re-attach victim thread %d...\n", victim_tid);
+            if (reattach_and_resume_tracing(victim_tid)) {
+                reattached_count++;
+                printf("    ✓ Victim thread %d re-attached\n", victim_tid);
+            } else {
+                kill(victim_tid, SIGCONT);
+                printf("    Sent SIGCONT to victim thread %d\n", victim_tid);
+            }
+        }
+        
+        printf("  Re-attached to %d/%zu threads\n", reattached_count, tids.size());
+        
+        // ==========================================
         // Clean data structures
+        // ==========================================
         printf("  Cleaning data structures...\n");
         waits_for.erase(victim_name);
         thread_locks.erase(victim_name);
@@ -573,10 +969,17 @@ bool resolve_deadlock_strategy1(const DeadlockInfo& deadlock) {
             waiters.erase(std::remove(waiters.begin(), waiters.end(), victim_name), waiters.end());
         }
         
-        printf("\033[1;32m[✓] Deadlock resolved! Program continues without tracing.\033[0m\n");
-        printf("[*] Agent exiting after successful resolution\n");
+        // ==========================================
+        // CRITICAL: Clear resolution flag and restore monitoring
+        // ==========================================
+        usleep(50000); // Give threads time to stabilize
         
-        // Final cleanup
+        // Clear resolution flag FIRST
+        monitoring_active.store(true);
+        
+        printf("\033[1;32m[✓] Deadlock resolved! Monitoring continues on remaining threads.\033[0m\n");
+        printf("[*] Agent continuing with tracing active\n");
+        
         fflush(stdout);
         fflush(stderr);
         
@@ -587,8 +990,6 @@ bool resolve_deadlock_strategy1(const DeadlockInfo& deadlock) {
         monitoring_active.store(true);
         return false;
     }
-    
-    return true;  // Never reached
 }
 
 bool emergency_deadlock_break(const DeadlockInfo& deadlock) {

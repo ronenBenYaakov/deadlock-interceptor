@@ -1,6 +1,6 @@
 #ifndef SNAPSHOT_H
 #define SNAPSHOT_H
-
+#pragma once
 #include "deadlock_resolver.h"
 #include <sys/types.h>
 

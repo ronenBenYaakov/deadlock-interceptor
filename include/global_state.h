@@ -1,6 +1,7 @@
 #ifndef GLOBAL_STATE_H
 #define GLOBAL_STATE_H
 
+#pragma once
 #include "deadlock_resolver.h"
 #include <mutex>
 #include <vector>
