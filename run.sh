@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-PYTHON_CMD="python3 ./app.py"
+PYTHON_CMD="nohup python3 app.py >/tmp/app.log 2>&1 &"
 INTERCEPTOR="./build/deadlock-interceptor"
 
 CHECKPOINT_DIR="/tmp/criu_checkpoint"
