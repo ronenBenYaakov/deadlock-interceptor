@@ -886,7 +886,7 @@ bool resolve_group_deadlock(const GroupDeadlockInfo& group_deadlock) {
             attempts++;
             
             // Try normal detach
-            if (ptrace(PTRACE_DETACH, tid, nullptr, (void*)SIGCONT) == 0) {
+            if (ptrace(PTRACE_DETACH, tid, nullptr, nullptr) == 0) {
                 std::cout << "    ✓ Detached thread " << tid << " (attempt " << attempts << ")\n";
                 detached = true;
                 continue;
@@ -896,7 +896,7 @@ bool resolve_group_deadlock(const GroupDeadlockInfo& group_deadlock) {
             if (ptrace(PTRACE_ATTACH, tid, nullptr, nullptr) == 0) {
                 int status;
                 waitpid(tid, &status, __WALL);
-                if (ptrace(PTRACE_DETACH, tid, nullptr, (void*)SIGCONT) == 0) {
+                if (ptrace(PTRACE_DETACH, tid, nullptr, nullptr) == 0) {
                     std::cout << "    ✓ Attach-then-detach thread " << tid << "\n";
                     detached = true;
                 }
@@ -958,7 +958,7 @@ bool resolve_group_deadlock(const GroupDeadlockInfo& group_deadlock) {
             helper << "int main() {\n";
             helper << "  printf(\"PTRACE HELPER running\\n\");\n";
             for (pid_t tid : still_traced) {
-                helper << "  ptrace(PTRACE_DETACH, " << tid << ", 0, (void*)SIGCONT);\n";
+                helper << "  ptrace(PTRACE_DETACH, " << tid << ", 0, nullptr);\n";
                 helper << "  kill(" << tid << ", SIGCONT);\n";
             }
             helper << "  kill(" << target_pid << ", SIGCONT);\n";
